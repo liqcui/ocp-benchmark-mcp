@@ -484,17 +484,41 @@ async def stream_chat_response(message: str):
     """Stream the chat response"""
     try:
         config = {"configurable": {"thread_id": "ocp_benchmark_mcp_stream_chat"}}
-        response = await llm_agent.ainvoke({
-            "input": message
-        },config=config)
+        # response = await llm_agent.ainvoke({
+        #     "input": message
+        # },config=config)
         
-        output = response.get("output", "")
-        formatted_output = format_json_as_table(output)
+        # output = response.get("output", "")
+        # formatted_output = format_json_as_table(output)
+        # # Non-streaming response
+        # config = {"configurable": {"thread_id": "ocp_benchmark_mcp_chat"}}
+
+        response = await llm_agent.ainvoke(
+            # "input": chat_request.message
+                {
+                "messages": [HumanMessage(content=message)],
+                },
         
+                config=config)
+        # print("#*"*30)
+        # print("response in chat:\n",response)
+        # print("#*"*30)
+        # print("response type:",type(response))
+        tool_msg = next( m for m in response["messages"]
+                    if m.__class__.__name__ == "ToolMessage"
+        )
+        content_json = tool_msg.content          # 字符串
+        print("content_json is ,",type(content_json))
+        # output = json.dump(content_json)  # 变成 Python dict
+        # print("cluster info:", output,type(output))
+        # print("#*"*30)
+        formatted_response = format_json_as_table(content_json)
+
+
         # Stream the response in chunks
         chunk_size = 50
-        for i in range(0, len(formatted_output), chunk_size):
-            chunk = formatted_output[i:i + chunk_size]
+        for i in range(0, len(formatted_response), chunk_size):
+            chunk = formatted_response[i:i + chunk_size]
             yield f"data: {json.dumps({'content': chunk, 'done': False})}\n\n"
             await asyncio.sleep(0.01)  # Small delay for better streaming effect
         
