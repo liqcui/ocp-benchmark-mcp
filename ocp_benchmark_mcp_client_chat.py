@@ -292,7 +292,7 @@ When presenting data:
 
 Always be thorough in your analysis and provide actionable insights."""),
         MessagesPlaceholder(variable_name="messages"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
+        # MessagesPlaceholder(variable_name="agent_scratchpad"),
     ])
 
     # 4. 使用 LangGraph 的 MemorySaver 保存对话历史（等效于 ConversationBufferWindowMemory）
@@ -305,8 +305,6 @@ Always be thorough in your analysis and provide actionable insights."""),
         checkpointer=memory,
     )
 
-    # 6. 返回一个可调用对象，用法与 AgentExecutor 一致：
-    #    agent.invoke({"messages": [...]}, config={"configurable": {"thread_id": "abc123"}})
     return agent
 
 
@@ -430,6 +428,7 @@ async def chat_interface(request: Request):
 @app.post("/chat")
 async def chat_endpoint(chat_request: ChatRequest):
     """Chat endpoint for interacting with the LLM"""
+    global llm_agent, memory
     try:
         if not llm_agent:
             raise HTTPException(status_code=503, detail="LLM agent not initialized")
@@ -450,13 +449,13 @@ async def chat_endpoint(chat_request: ChatRequest):
             print(chat_request.message)
             response = await llm_agent.ainvoke(
                 # "input": chat_request.message
-                 { "agent_scratchpad": [],
+                 {
                   "messages": [HumanMessage(content=chat_request.message)],
                   },
            
                  config=config)
             print("#*"*30)
-            print("response in chat:\n")            
+            print("response in chat:\n",response)            
             formatted_response = format_json_as_table(response.get("output", ""))
             
             return ChatResponse(
