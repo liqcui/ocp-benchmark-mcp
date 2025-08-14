@@ -15,8 +15,11 @@ from langchain_openai import ChatOpenAI
 from langchain.tools import BaseTool
 from langchain.schema import BaseMessage, HumanMessage, AIMessage
 import pandas as pd
-
+#MCP imports
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 from analysis.ocp_benchmark_performance_anlysis import PerformanceAnalyzer
+from dotenv import load_dotenv
 
 # Set timezone to UTC
 os.environ['TZ'] = 'UTC'
@@ -43,6 +46,95 @@ class AgentState(TypedDict):
     current_task: str
     error: Optional[str]
 
+class MCPClient:
+    """MCP Client for connecting to OCP Benchmark MCP Server."""
+    
+    def __init__(self, mcp_server_url: str = "http://localhost:8000/"):
+        self.mcp_server_url = mcp_server_url.rstrip('/')
+        self.session = None
+    
+    # async def __aenter__(self):
+    #     """Async context manager entry."""
+    #     # self.session = aiohttp.ClientSession()
+    #     url = f"{self.mcp_server_url}/mcp"
+    #     # Connect to the server using Streamable HTTP
+    #     async with streamablehttp_client(
+    #             url,
+    #             headers={"accept": "application/json"}
+    #         ) as (
+    #             read_stream,
+    #             write_stream,
+    #             get_session_id,
+    #     ):
+    #         async with ClientSession(read_stream, write_stream) as session:
+    #             # Initialize the connection
+    #             self.session=session
+    #             await self.session.initialize()
+    #             logger.info("Successfully connected to MCP server")
+    #     return self
+    
+    # async def __aexit__(self, exc_type, exc_val, exc_tb):
+    #     """Async context manager exit."""
+    #     return self
+     
+    async def call_tool(self, tool_name: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+
+        """Call a tool on the MCP tool via HTTP.
+
+        Args:
+            tool_name: Name of the tool to call
+            params: Parameters for the tool
+
+        Returns:
+            Tool response data
+        """    
+        try:
+            url = f"{self.mcp_server_url}/mcp"
+
+            # Connect to the server using Streamable HTTP
+            async with streamablehttp_client(
+                url,
+                headers={"accept": "application/json"}
+                ) as (
+                    read_stream,
+                    write_stream,
+                    get_session_id,
+            ):
+                async with ClientSession(read_stream, write_stream) as session:
+                    # Initialize the connection
+                    await session.initialize()
+ 
+                    # Get session id once connection established
+                    session_id = get_session_id() 
+                    print("Session ID: in call_tool", session_id)
+            
+                    print(f"Calling tool {tool_name} with params {params}",type(params))
+                    
+                    # #Make a request to the server using HTTP, May convert the response to JSON if needed
+                    # request_data = {
+                    #      "request": params or {}
+                    # }
+                    request_data =  params or {}
+            
+                    print(f"Calling tool {tool_name} with params {request_data}",type(request_data))
+
+                    result = await session.call_tool(tool_name, request_data)
+                    # print("#*"*50)
+                    # print("result in call_tool of mcp client:",result)
+                    # print("#*"*50)
+                    print(f"{tool_name} = {result.content[0].text}")
+                    json_data = json.loads(result.content[0].text)
+                    return json_data
+
+        except Exception as e:
+            print(f"Call MCP tool failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise 
+
+    async def aclose(self):
+        if hasattr(self.session, "close"):
+            await self.session.close()
 
 class MCPAgentTool(BaseTool):
     """Custom tool for calling MCP server from agent"""
@@ -60,29 +152,27 @@ class MCPAgentTool(BaseTool):
         try:
             if not mcp_client:
                 return json.dumps({"error": "MCP client not initialized"})
-            
-            payload = {
-                "method": "tools/call",
-                "params": {
-                    "name": self.mcp_tool_name,
-                    "arguments": kwargs
-                }
-            }
-            
-            response = await mcp_client.post(f"{MCP_SERVER_URL}/mcp", json=payload)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if "result" in result and "content" in result["result"]:
-                    return result["result"]["content"][0]["text"]
-                else:
-                    return json.dumps(result)
-            else:
-                return json.dumps({"error": f"MCP call failed: {response.status_code}"})
+                  
+            params=  kwargs or {}
+                      
+            response=await mcp_client.call_tool(self.mcp_tool_name,params=params)
+            print(response)
+            if response is None:
+                return "Error: No response from MCP tool"
+            return json.dumps(response, indent=2)
+            # if response.status_code == 200:
+            #     result = response.json()
+            #     if "result" in result and "content" in result["result"]:
+            #         content = result["result"]["content"][0]["text"]
+            #         return content
+            #     else:
+            #         return json.dumps(result, indent=2)
+            # else:
+            #     return f"Error: MCP tool call failed with status {response.status_code}"
         
         except Exception as e:
             logger.error(f"Error calling MCP tool {self.mcp_tool_name}: {e}")
-            return json.dumps({"error": str(e)})
+            return f"Error calling MCP tool: {str(e)}"
 
 
 def create_agent_tools() -> List[MCPAgentTool]:
@@ -126,14 +216,17 @@ class OpenShiftBenchmarkAgent:
         try:
             # Initialize HTTP client
             global mcp_client
-            self.mcp_client = httpx.AsyncClient(timeout=120.0)
+            self.mcp_client = MCPClient(MCP_SERVER_URL)
             mcp_client = self.mcp_client
-            
+            load_dotenv()
+            api_key = os.getenv("GEMINI_API_KEY")
+            base_url = os.getenv("BASE_URL")
+
             # Initialize LLM
             self.llm = ChatOpenAI(
-                model="gpt-4o-mini",
-                temperature=0,
-                streaming=False
+                model="gemini-1.5-flash",
+                openai_api_key="anykey",
+                temperature=0
             )
             
             # Initialize tools

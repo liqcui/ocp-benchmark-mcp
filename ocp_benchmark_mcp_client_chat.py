@@ -9,13 +9,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-
+import uuid
 from langchain.memory import ConversationBufferWindowMemory
 from langchain.schema import HumanMessage, AIMessage,SystemMessage
 from langchain_openai import ChatOpenAI
@@ -25,6 +24,7 @@ from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.prebuilt import create_react_agent
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langgraph.checkpoint.memory import MemorySaver
+from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 #MCP imports
 from mcp import ClientSession
@@ -32,9 +32,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 # Set timezone to UTC
 os.environ['TZ'] = 'UTC'
-load_dotenv()
-api_key = os.getenv("GEMINI_API_KEY")
-base_url = os.getenv("BASE_URL")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -82,8 +80,6 @@ class MCPClient:
                 # Initialize the connection
                 self.session=session
                 await self.session.initialize()
-                response =await self.session.ping()
-                print(f"MCP server health status: {response.status}")
                 logger.info("Successfully connected to MCP server")
         return self
     
@@ -117,8 +113,7 @@ class MCPClient:
                 async with ClientSession(read_stream, write_stream) as session:
                     # Initialize the connection
                     await session.initialize()
-                    await session.ping()
-                    print("Ping success ...")
+ 
                     # Get session id once connection established
                     session_id = get_session_id() 
                     print("Session ID: in call_tool", session_id)
@@ -127,19 +122,18 @@ class MCPClient:
                     
                     #Make a request to the server using HTTP, May convert the response to JSON if needed
                     request_data = {
-                         "args": params or {}
+                         "request": params or {}
                     }
-                    params = params or {}
 
                     print(f"Calling tool {tool_name} with params {request_data}",type(request_data))
 
                     result = await session.call_tool(tool_name, request_data)
-                    print("#*"*50)
-                    print("result in call_tool of mcp client:",result)
-                    print("#*"*50)
+                    # print("#*"*50)
+                    # print("result in call_tool of mcp client:",result)
+                    # print("#*"*50)
                     print(f"{tool_name} = {result.content[0].text}")
-                    #json_data = json.loads(result.content[0].text)
-                    return result.content[0].text
+                    json_data = json.loads(result.content[0].text)
+                    return json_data
 
         except Exception as e:
             print(f"Call MCP tool failed: {str(e)}")
@@ -173,6 +167,9 @@ class MCPTool(BaseTool):
             # response = await mcp_client.post(f"{MCP_SERVER_URL}/mcp", json=payload)
             response=await mcp_client.call_tool(self.mcp_tool_name,params=params)
             print(response)
+            if response is None:
+                return "Error: No response from MCP tool"
+            return json.dumps(response, indent=2)
             # if response.status_code == 200:
             #     result = response.json()
             #     if "result" in result and "content" in result["result"]:
@@ -241,7 +238,9 @@ def create_mcp_tools() -> List[MCPTool]:
 
 def create_llm_agent():
     """Create the ReAct agent with LangGraph (create_react_agent)."""
-    
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
+    base_url = os.getenv("BASE_URL")    
     # 1. LLM
     # llm = ChatOpenAI(
     #     model="gpt-4o-mini",
@@ -250,23 +249,32 @@ def create_llm_agent():
     # )
     # llm=ChatOpenAI(
     #         model="deepseek-r1:14b",
-    #         openai_api_base="http://openshift-qe-017.lab.eng.rdu2.redhat.com:31128/v1/",
+    #         openai_api_base="xxxx",
     #         openai_api_key="anykey",
     #         temperature=0, 
     #         streaming=True
     #     ) 
-    llm = ChatOpenAI(
-        model="gemini-2.0-flash-001",          # 任意支持 tools 的 Gemini 模型
-        openai_api_base=base_url,
-        openai_api_key=api_key,   # 字符串即可
-        temperature=0,
-        max_tokens=4096
-    )
+
+    # llm = ChatOpenAI(
+    #     model="gemini-2.0-flash-001",          # 任意支持 tools 的 Gemini 模型
+    #     openai_api_base=base_url,
+    #     openai_api_key=api_key,   # 字符串即可
+    #     temperature=0,
+    #     max_tokens=4096
+    # )
+
+    llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    google_api_key=api_key,
+    temperature=0,
+    max_output_tokens=4096
+)    
     # 2. Tools
     tools = create_mcp_tools()
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are an expert OpenShift cluster performance analyst. You help users monitor, analyze, and troubleshoot OpenShift cluster performance using various metrics and tools.
+        ("system",
+         """You are an expert OpenShift cluster performance analyst. You help users monitor, analyze, and troubleshoot OpenShift cluster performance using various metrics and tools.
 
 Key capabilities:
 - Analyze cluster health and performance metrics
@@ -285,9 +293,8 @@ When presenting data:
 - Compare values against baseline thresholds
 
 Always be thorough in your analysis and provide actionable insights."""),
-        MessagesPlaceholder(variable_name="{{chat_history}}"),
-        ("human", "{{input}}"),
-        MessagesPlaceholder(variable_name="{{agent_scratchpad}}"),
+        MessagesPlaceholder(variable_name="messages"),
+        # MessagesPlaceholder(variable_name="agent_scratchpad"),
     ])
 
     # 4. 使用 LangGraph 的 MemorySaver 保存对话历史（等效于 ConversationBufferWindowMemory）
@@ -300,8 +307,6 @@ Always be thorough in your analysis and provide actionable insights."""),
         checkpointer=memory,
     )
 
-    # 6. 返回一个可调用对象，用法与 AgentExecutor 一致：
-    #    agent.invoke({"messages": [...]}, config={"configurable": {"thread_id": "abc123"}})
     return agent
 
 
@@ -425,6 +430,7 @@ async def chat_interface(request: Request):
 @app.post("/chat")
 async def chat_endpoint(chat_request: ChatRequest):
     """Chat endpoint for interacting with the LLM"""
+    global llm_agent, memory
     try:
         if not llm_agent:
             raise HTTPException(status_code=503, detail="LLM agent not initialized")
@@ -432,18 +438,36 @@ async def chat_endpoint(chat_request: ChatRequest):
         logger.info(f"Processing chat message: {chat_request.message}")
         
         if chat_request.stream:
+ 
             return StreamingResponse(
                 stream_chat_response(chat_request.message),
                 media_type="text/plain"
             )
         else:
             # Non-streaming response
-            config = {"configurable": {"thread_id": "ocp_benchmark_mcp_chat"}}
-            response = await llm_agent.ainvoke({
-                "input": chat_request.message
-            },config=config)
-            
-            formatted_response = format_json_as_table(response.get("output", ""))
+            thread_uuid=uuid.uuid4()
+            config = {"configurable": {"thread_id": "ocp_benchmark_mcp_chat"+str(thread_uuid)}}
+
+            response = await llm_agent.ainvoke(
+                # "input": chat_request.message
+                 {
+                  "messages": [HumanMessage(content=chat_request.message)],
+                  },
+           
+                 config=config)
+            print("#*"*30)
+            print("response in chat:\n",response)
+            # print("#*"*30)
+            # print("response type:",type(response))
+            tool_msg = next( m for m in response["messages"]
+                      if m.__class__.__name__ == "ToolMessage"
+            )
+            content_json = tool_msg.content          # 字符串
+            print("content_json is ,",type(content_json))
+            # output = json.dump(content_json)  # 变成 Python dict
+            # print("cluster info:", output,type(output))
+            # print("#*"*30)
+            formatted_response = format_json_as_table(content_json)
             
             return ChatResponse(
                 response=formatted_response,
@@ -452,24 +476,52 @@ async def chat_endpoint(chat_request: ChatRequest):
     
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 
 async def stream_chat_response(message: str):
     """Stream the chat response"""
+    thread_uuid=uuid.uuid4()
     try:
-        config = {"configurable": {"thread_id": "ocp_benchmark_mcp_stream_chat"}}
-        response = await llm_agent.ainvoke({
-            "input": message
-        },config=config)
+        config = {"configurable": {"thread_id": "ocp_benchmark_mcp_stream_chat"+str(thread_uuid)}}
+        # response = await llm_agent.ainvoke({
+        #     "input": message
+        # },config=config)
         
-        output = response.get("output", "")
-        formatted_output = format_json_as_table(output)
+        # output = response.get("output", "")
+        # formatted_output = format_json_as_table(output)
+        # # Non-streaming response
+        # config = {"configurable": {"thread_id": "ocp_benchmark_mcp_chat"}}
+        response=[]
+        response = await llm_agent.ainvoke(
+            # "input": chat_request.message
+                {
+                "messages": [HumanMessage(content=message)],
+                },
         
+                config=config)
+        print("#*"*30)
+        print("response in stream_chat_response:\n",response)
+        # print("#*"*30)
+        # print("response type:",type(response))
+        tool_msg = next( m for m in response["messages"]
+                    if m.__class__.__name__ == "ToolMessage"
+        )
+        content_json = tool_msg.content          # 字符串
+        print("#*"*30)
+        print("content_json is :\n",content_json)
+        print("content_json is ,",type(content_json))
+     
+        formatted_response = format_json_as_table(content_json)
+
+
         # Stream the response in chunks
         chunk_size = 50
-        for i in range(0, len(formatted_output), chunk_size):
-            chunk = formatted_output[i:i + chunk_size]
+        for i in range(0, len(formatted_response), chunk_size):
+            chunk = formatted_response[i:i + chunk_size]
+            # print(f"data: {json.dumps({'content': chunk, 'done': False})}\n\n")
             yield f"data: {json.dumps({'content': chunk, 'done': False})}\n\n"
             await asyncio.sleep(0.01)  # Small delay for better streaming effect
         
