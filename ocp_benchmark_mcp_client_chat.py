@@ -463,9 +463,9 @@ async def chat_endpoint(chat_request: ChatRequest):
             )
             content_json = tool_msg.content          # 字符串
             output = json.loads(content_json)  # 变成 Python dict
-            print("cluster info:", output)
+            print("cluster info:", output,type(output))
             print("#*"*30)
-            formatted_response = format_json_as_table(response.get("output", ""))
+            formatted_response = format_json_as_table(output)
             
             return ChatResponse(
                 response=formatted_response,
