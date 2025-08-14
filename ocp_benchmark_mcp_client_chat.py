@@ -292,7 +292,7 @@ When presenting data:
 
 Always be thorough in your analysis and provide actionable insights."""),
         MessagesPlaceholder(variable_name="messages"),
-        MessagesPlaceholder(variable_name="agent_scratchpad")
+        # MessagesPlaceholder(variable_name="agent_scratchpad")
     ])
 
     # 4. 使用 LangGraph 的 MemorySaver 保存对话历史（等效于 ConversationBufferWindowMemory）
@@ -301,7 +301,7 @@ Always be thorough in your analysis and provide actionable insights."""),
     agent = create_react_agent(
         model=llm,
         tools=tools,
-        prompt=prompt,
+        messages=prompt,
         checkpointer=memory,
     )
 
