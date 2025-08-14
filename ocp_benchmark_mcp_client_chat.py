@@ -9,7 +9,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -168,6 +167,9 @@ class MCPTool(BaseTool):
             # response = await mcp_client.post(f"{MCP_SERVER_URL}/mcp", json=payload)
             response=await mcp_client.call_tool(self.mcp_tool_name,params=params)
             print(response)
+            if response is None:
+                return "Error: No response from MCP tool"
+            return json.dumps(response, indent=2)
             # if response.status_code == 200:
             #     result = response.json()
             #     if "result" in result and "content" in result["result"]:
