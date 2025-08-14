@@ -12,6 +12,8 @@ import httpx
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
 # Set timezone to UTC
 os.environ['TZ'] = 'UTC'
@@ -69,6 +71,90 @@ class ComprehensiveReportRequest(BaseModel):
     """Request model for comprehensive report"""
     duration_hours: Optional[int] = Field(default=1, ge=1, le=24, description="Duration in hours")
 
+class MCPClient:
+    """MCP Client for connecting to OCP Benchmark MCP Server."""
+    
+    def __init__(self, mcp_server_url: str = "http://localhost:8000/"):
+        self.mcp_server_url = mcp_server_url.rstrip('/')
+        self.session = None
+    
+    async def __aenter__(self):
+        """Async context manager entry."""
+        # self.session = aiohttp.ClientSession()
+        url = f"{self.mcp_server_url}/mcp"
+        # Connect to the server using Streamable HTTP
+        async with streamablehttp_client(
+                url,
+                headers={"accept": "application/json"}
+            ) as (
+                read_stream,
+                write_stream,
+                get_session_id,
+        ):
+            async with ClientSession(read_stream, write_stream) as session:
+                # Initialize the connection
+                self.session=session
+                await self.session.initialize()
+                logger.info("Successfully connected to MCP server")
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        return self
+     
+    async def call_tool(self, tool_name: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+
+        """Call a tool on the MCP tool via HTTP.
+
+        Args:
+            tool_name: Name of the tool to call
+            params: Parameters for the tool
+
+        Returns:
+            Tool response data
+        """    
+        try:
+            url = f"{self.mcp_server_url}/mcp"
+
+            # Connect to the server using Streamable HTTP
+            async with streamablehttp_client(
+                url,
+                headers={"accept": "application/json"}
+                ) as (
+                    read_stream,
+                    write_stream,
+                    get_session_id,
+            ):
+                async with ClientSession(read_stream, write_stream) as session:
+                    # Initialize the connection
+                    await session.initialize()
+ 
+                    # Get session id once connection established
+                    session_id = get_session_id() 
+                    print("Session ID: in call_tool", session_id)
+            
+                    print(f"Calling tool {tool_name} with params {params}",type(params))
+                    
+                    #Make a request to the server using HTTP, May convert the response to JSON if needed
+                    request_data = {
+                         "request": params or {}
+                    }
+
+                    print(f"Calling tool {tool_name} with params {request_data}",type(request_data))
+
+                    result = await session.call_tool(tool_name, request_data)
+                    print("#*"*50)
+                    print("result in call_tool of mcp client:",result)
+                    print("#*"*50)
+                    print(f"{tool_name} = {result.content[0].text}")
+                    #json_data = json.loads(result.content[0].text)
+                    return result.content[0].text
+
+        except Exception as e:
+            print(f"Call MCP tool failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -79,18 +165,15 @@ async def lifespan(app: FastAPI):
     
     try:
         # Initialize HTTP client for MCP communication
-        mcp_client = httpx.AsyncClient(timeout=60.0)
+        mcp_client = MCPClient(MCP_SERVER_URL)
         
         # Wait a moment for MCP server to be ready
-        await asyncio.sleep(2)
-        
-        # Test connection to MCP server
-        try:
-            response = await mcp_client.get(f"{MCP_SERVER_URL}/health")
-            logger.info("Successfully connected to MCP server")
-        except Exception as e:
-            logger.warning(f"Could not connect to MCP server: {e}")
-        
+        await asyncio.sleep(10)
+        async with mcp_client:
+            # Test connection
+            if not mcp_client.session:
+                raise HTTPException(status_code=503, detail="Failed to connect to MCP server")
+ 
         logger.info("MCP API Server started successfully")
         
     except Exception as e:
@@ -114,31 +197,22 @@ app = FastAPI(
 )
 
 
-async def call_mcp_tool(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+async def call_mcp_tool(tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """Call an MCP tool via HTTP"""
     try:
         if not mcp_client:
             raise HTTPException(status_code=503, detail="MCP client not initialized")
         
-        payload = {
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": parameters
+        
+        request_data = {
+            "request": params or {}
             }
-        }
+    
         
-        response = await mcp_client.post(f"{MCP_SERVER_URL}/mcp", json=payload)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if "result" in result and "content" in result["result"]:
-                # Extract the actual content from MCP response
-                content = result["result"]["content"][0]["text"]
-                import json
-                return json.loads(content)
-            else:
-                return result
+        response = await mcp_client.call_tool(tool_name, request_data)
+        print(f"Response from MCP tool {tool_name}: {response}")
+        if response:
+            return response
         else:
             raise HTTPException(status_code=response.status_code, detail=f"MCP tool call failed: {response.text}")
     
@@ -183,12 +257,10 @@ async def health_check():
 @app.post("/cluster/info")
 async def get_cluster_info(request: ClusterInfoRequest):
     """Get OpenShift cluster information"""
-    try:
-        result = await call_mcp_tool("get_cluster_info", request.model_dump())
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(f"Error in get_cluster_info: {e}")
-        raise
+
+    # Get cluster info
+    return await mcp_client.call_tool("get_cluster_info")
+
 
 
 @app.get("/cluster/info")

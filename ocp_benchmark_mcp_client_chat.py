@@ -123,9 +123,8 @@ class MCPClient:
                     
                     #Make a request to the server using HTTP, May convert the response to JSON if needed
                     request_data = {
-                         "args": params or {}
+                         "request": params or {}
                     }
-                    params = params or {}
 
                     print(f"Calling tool {tool_name} with params {request_data}",type(request_data))
 
