@@ -438,8 +438,7 @@ async def chat_endpoint(chat_request: ChatRequest):
         logger.info(f"Processing chat message: {chat_request.message}")
         
         if chat_request.stream:
-            print("#*"*30)
-            print("chat_request.stream in", chat_request.message)
+ 
             return StreamingResponse(
                 stream_chat_response(chat_request.message),
                 media_type="text/plain"
@@ -447,8 +446,7 @@ async def chat_endpoint(chat_request: ChatRequest):
         else:
             # Non-streaming response
             config = {"configurable": {"thread_id": "ocp_benchmark_mcp_chat"}}
-            print("#*"*30)
-            print(chat_request.message)
+
             response = await llm_agent.ainvoke(
                 # "input": chat_request.message
                  {
@@ -457,7 +455,13 @@ async def chat_endpoint(chat_request: ChatRequest):
            
                  config=config)
             print("#*"*30)
-            print("response in chat:\n",response)            
+            print("response in chat:\n",response)
+            print("#*"*30)
+            print("response type:",type(response))
+            print("response content:",response.get("ToolMessage", ""),type(response.get("ToolMessage", "")))
+            if not response or "output" not in response:
+                raise HTTPException(status_code=500, detail="No response from LLM agent")
+                     
             formatted_response = format_json_as_table(response.get("output", ""))
             
             return ChatResponse(
