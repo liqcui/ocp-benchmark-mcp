@@ -133,8 +133,8 @@ class MCPClient:
                     # print("result in call_tool of mcp client:",result)
                     # print("#*"*50)
                     print(f"{tool_name} = {result.content[0].text}")
-                    #json_data = json.loads(result.content[0].text)
-                    return result.content[0].text
+                    json_data = json.loads(result.content[0].text)
+                    return json_data
 
         except Exception as e:
             print(f"Call MCP tool failed: {str(e)}")
