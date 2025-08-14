@@ -81,8 +81,6 @@ class MCPClient:
                 # Initialize the connection
                 self.session=session
                 await self.session.initialize()
-                response =await self.session.ping()
-                print(f"MCP server health status: {response.status}")
                 logger.info("Successfully connected to MCP server")
         return self
     
@@ -116,8 +114,7 @@ class MCPClient:
                 async with ClientSession(read_stream, write_stream) as session:
                     # Initialize the connection
                     await session.initialize()
-                    await session.ping()
-                    print("Ping success ...")
+ 
                     # Get session id once connection established
                     session_id = get_session_id() 
                     print("Session ID: in call_tool", session_id)
