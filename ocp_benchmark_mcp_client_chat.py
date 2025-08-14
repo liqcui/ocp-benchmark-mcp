@@ -454,18 +454,19 @@ async def chat_endpoint(chat_request: ChatRequest):
                   },
            
                  config=config)
-            print("#*"*30)
-            print("response in chat:\n",response)
-            print("#*"*30)
-            print("response type:",type(response))
+            # print("#*"*30)
+            # print("response in chat:\n",response)
+            # print("#*"*30)
+            # print("response type:",type(response))
             tool_msg = next( m for m in response["messages"]
                       if m.__class__.__name__ == "ToolMessage"
             )
             content_json = tool_msg.content          # 字符串
-            output = json.loads(content_json)  # 变成 Python dict
-            print("cluster info:", output,type(output))
-            print("#*"*30)
-            formatted_response = format_json_as_table(output)
+            print("content_json is ,",type(content_json))
+            # output = json.dump(content_json)  # 变成 Python dict
+            # print("cluster info:", output,type(output))
+            # print("#*"*30)
+            formatted_response = format_json_as_table(content_json)
             
             return ChatResponse(
                 response=formatted_response,
