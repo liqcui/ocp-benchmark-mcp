@@ -458,10 +458,13 @@ async def chat_endpoint(chat_request: ChatRequest):
             print("response in chat:\n",response)
             print("#*"*30)
             print("response type:",type(response))
-            print("response content:",response.get("ToolMessage", ""),type(response.get("ToolMessage", "")))
-            if not response or "output" not in response:
-                raise HTTPException(status_code=500, detail="No response from LLM agent")
-                     
+            tool_msg = next( m for m in response["messages"]
+                      if m.__class__.__name__ == "ToolMessage"
+            )
+            content_json = tool_msg.content          # 字符串
+            output = json.loads(content_json)  # 变成 Python dict
+            print("cluster info:", output)
+            print("#*"*30)
             formatted_response = format_json_as_table(response.get("output", ""))
             
             return ChatResponse(
