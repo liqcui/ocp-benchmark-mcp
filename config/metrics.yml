@@ -1,0 +1,75 @@
+metrics:
+  node_metrics:
+    cpu_usage:
+      query: '100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)'
+      description: "Node CPU usage percentage"
+    memory_usage:
+      query: '(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100'
+      description: "Node memory usage percentage"
+    
+  pod_metrics:
+    cpu_usage:
+      query: 'sum(rate(container_cpu_usage_seconds_total{container!="POD",container!=""}[5m])) by (pod, namespace) * 100'
+      description: "Pod CPU usage percentage"
+    memory_usage:
+      query: 'sum(container_memory_working_set_bytes{container!="POD",container!=""}) by (pod, namespace) / 1024 / 1024'
+      description: "Pod memory usage in MB"
+  
+  disk_io:
+    read_bytes:
+      query: 'rate(node_disk_read_bytes_total[5m])'
+      description: "Disk read bytes per second"
+    write_bytes:
+      query: 'rate(node_disk_written_bytes_total[5m])'
+      description: "Disk write bytes per second"
+    read_iops:
+      query: 'rate(node_disk_reads_completed_total[5m])'
+      description: "Disk read IOPS"
+    write_iops:
+      query: 'rate(node_disk_writes_completed_total[5m])'
+      description: "Disk write IOPS"
+    read_latency:
+      query: 'rate(node_disk_read_time_seconds_total[5m]) / rate(node_disk_reads_completed_total[5m])'
+      description: "Average disk read latency in seconds"
+    write_latency:
+      query: 'rate(node_disk_write_time_seconds_total[5m]) / rate(node_disk_writes_completed_total[5m])'
+      description: "Average disk write latency in seconds"
+  
+  network:
+    receive_bytes:
+      query: 'rate(node_network_receive_bytes_total[5m])'
+      description: "Network receive bytes per second"
+    transmit_bytes:
+      query: 'rate(node_network_transmit_bytes_total[5m])'
+      description: "Network transmit bytes per second"
+    receive_packets:
+      query: 'rate(node_network_receive_packets_total[5m])'
+      description: "Network receive packets per second"
+    transmit_packets:
+      query: 'rate(node_network_transmit_packets_total[5m])'
+      description: "Network transmit packets per second"
+    packet_loss:
+      query: 'rate(node_network_receive_drop_total[5m]) + rate(node_network_transmit_drop_total[5m])'
+      description: "Network packet loss rate"
+  
+  api_latency:
+    p50:
+      query: 'histogram_quantile(0.50, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (le, verb, resource))'
+      description: "API server request latency 50th percentile"
+    p95:
+      query: 'histogram_quantile(0.95, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (le, verb, resource))'
+      description: "API server request latency 95th percentile"
+    p99:
+      query: 'histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (le, verb, resource))'
+      description: "API server request latency 99th percentile"
+  
+  cluster_metrics:
+    node_availability:
+      query: 'sum(kube_node_status_condition{condition="Ready",status="true"}) / sum(kube_node_info) * 100'
+      description: "Node availability percentage"
+    pod_success_rate:
+      query: 'sum(kube_pod_status_phase{phase="Running"}) / sum(kube_pod_info) * 100'
+      description: "Pod success rate percentage"
+    etcd_response_time:
+      query: 'histogram_quantile(0.95, sum(rate(etcd_request_duration_seconds_bucket[5m])) by (le))'
+      description: "etcd response time 95th percentile"
