@@ -19,3 +19,4 @@ jinja2>=3.1.0
 aiofiles>=23.2.0
 python-multipart>=0.0.6
 langgraph>=0.3.0
+langchain_google_genai >=0.2.0

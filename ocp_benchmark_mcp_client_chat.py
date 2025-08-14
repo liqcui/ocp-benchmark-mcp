@@ -25,6 +25,7 @@ from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.prebuilt import create_react_agent
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langgraph.checkpoint.memory import MemorySaver
+from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 #MCP imports
 from mcp import ClientSession
@@ -32,9 +33,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 # Set timezone to UTC
 os.environ['TZ'] = 'UTC'
-load_dotenv()
-api_key = os.getenv("GEMINI_API_KEY")
-base_url = os.getenv("BASE_URL")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -241,7 +240,9 @@ def create_mcp_tools() -> List[MCPTool]:
 
 def create_llm_agent():
     """Create the ReAct agent with LangGraph (create_react_agent)."""
-    
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
+    base_url = os.getenv("BASE_URL")    
     # 1. LLM
     # llm = ChatOpenAI(
     #     model="gpt-4o-mini",
@@ -250,23 +251,32 @@ def create_llm_agent():
     # )
     # llm=ChatOpenAI(
     #         model="deepseek-r1:14b",
-    #         openai_api_base="http://openshift-qe-017.lab.eng.rdu2.redhat.com:31128/v1/",
+    #         openai_api_base="xxxx",
     #         openai_api_key="anykey",
     #         temperature=0, 
     #         streaming=True
     #     ) 
-    llm = ChatOpenAI(
-        model="gemini-2.0-flash-001",          # 任意支持 tools 的 Gemini 模型
-        openai_api_base=base_url,
-        openai_api_key=api_key,   # 字符串即可
-        temperature=0,
-        max_tokens=4096
-    )
+
+    # llm = ChatOpenAI(
+    #     model="gemini-2.0-flash-001",          # 任意支持 tools 的 Gemini 模型
+    #     openai_api_base=base_url,
+    #     openai_api_key=api_key,   # 字符串即可
+    #     temperature=0,
+    #     max_tokens=4096
+    # )
+
+    llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    google_api_key=api_key,
+    temperature=0,
+    max_output_tokens=4096
+)    
     # 2. Tools
     tools = create_mcp_tools()
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are an expert OpenShift cluster performance analyst. You help users monitor, analyze, and troubleshoot OpenShift cluster performance using various metrics and tools.
+        ("system",
+         """You are an expert OpenShift cluster performance analyst. You help users monitor, analyze, and troubleshoot OpenShift cluster performance using various metrics and tools.
 
 Key capabilities:
 - Analyze cluster health and performance metrics
@@ -285,9 +295,7 @@ When presenting data:
 - Compare values against baseline thresholds
 
 Always be thorough in your analysis and provide actionable insights."""),
-        MessagesPlaceholder(variable_name="{{chat_history}}"),
-        ("human", "{{input}}"),
-        MessagesPlaceholder(variable_name="{{agent_scratchpad}}"),
+        MessagesPlaceholder(variable_name="messages"),
     ])
 
     # 4. 使用 LangGraph 的 MemorySaver 保存对话历史（等效于 ConversationBufferWindowMemory）
@@ -432,6 +440,8 @@ async def chat_endpoint(chat_request: ChatRequest):
         logger.info(f"Processing chat message: {chat_request.message}")
         
         if chat_request.stream:
+            print("#*"*30)
+            print("chat_request.stream in", chat_request.message)
             return StreamingResponse(
                 stream_chat_response(chat_request.message),
                 media_type="text/plain"
@@ -439,10 +449,14 @@ async def chat_endpoint(chat_request: ChatRequest):
         else:
             # Non-streaming response
             config = {"configurable": {"thread_id": "ocp_benchmark_mcp_chat"}}
-            response = await llm_agent.ainvoke({
-                "input": chat_request.message
-            },config=config)
-            
+            print("#*"*30)
+            print(chat_request.message)
+            response = await llm_agent.ainvoke(
+                # "input": chat_request.message
+                 {"messages": [HumanMessage(content=chat_request.message)]},
+                 config=config)
+            print("#*"*30)
+            print(response)            
             formatted_response = format_json_as_table(response.get("output", ""))
             
             return ChatResponse(
@@ -452,6 +466,8 @@ async def chat_endpoint(chat_request: ChatRequest):
     
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 
