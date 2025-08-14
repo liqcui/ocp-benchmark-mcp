@@ -519,6 +519,7 @@ async def stream_chat_response(message: str):
         chunk_size = 50
         for i in range(0, len(formatted_response), chunk_size):
             chunk = formatted_response[i:i + chunk_size]
+            print(f"data: {json.dumps({'content': chunk, 'done': False})}\n\n")
             yield f"data: {json.dumps({'content': chunk, 'done': False})}\n\n"
             await asyncio.sleep(0.01)  # Small delay for better streaming effect
         
