@@ -450,8 +450,9 @@ async def chat_endpoint(chat_request: ChatRequest):
             print(chat_request.message)
             response = await llm_agent.ainvoke(
                 # "input": chat_request.message
-                 {"messages": [HumanMessage(content=chat_request.message)],
-                  "agent_scratchpad": []},
+                 { "agent_scratchpad": [],
+                  "messages": [HumanMessage(content=chat_request.message)],
+                  },
            
                  config=config)
             print("#*"*30)
