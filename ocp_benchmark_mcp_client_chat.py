@@ -129,9 +129,9 @@ class MCPClient:
                     print(f"Calling tool {tool_name} with params {request_data}",type(request_data))
 
                     result = await session.call_tool(tool_name, request_data)
-                    print("#*"*50)
-                    print("result in call_tool of mcp client:",result)
-                    print("#*"*50)
+                    # print("#*"*50)
+                    # print("result in call_tool of mcp client:",result)
+                    # print("#*"*50)
                     print(f"{tool_name} = {result.content[0].text}")
                     #json_data = json.loads(result.content[0].text)
                     return result.content[0].text
@@ -452,7 +452,7 @@ async def chat_endpoint(chat_request: ChatRequest):
                  {"messages": [HumanMessage(content=chat_request.message)]},
                  config=config)
             print("#*"*30)
-            print(response)            
+            print("response in chat:\n")            
             formatted_response = format_json_as_table(response.get("output", ""))
             
             return ChatResponse(
