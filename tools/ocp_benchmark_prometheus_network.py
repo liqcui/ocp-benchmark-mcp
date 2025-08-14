@@ -1,410 +1,483 @@
-#!/usr/bin/env python3
-"""Prometheus Network Metrics Module"""
-
+"""Network metrics collection from Prometheus."""
 import json
 import logging
-from typing import Dict, Any, Optional, List
-from datetime import datetime, timedelta
-import requests
-import asyncio
-from config.ocp_benchmark_config import config
-from ocauth.ocp_benchmark_auth import auth
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, Optional
+from tools.ocp_benchmark_prometheus_basequery import prometheus_client
+from config.ocp_benchmark_config import config_manager
+
 
 logger = logging.getLogger(__name__)
 
+
 class NetworkMetricsCollector:
-    """Collect network metrics from Prometheus"""
+    """Collects network metrics from Prometheus."""
     
     def __init__(self):
-        self.prometheus_url = None
-        self.prometheus_token = None
-        self._initialize_prometheus()
+        self.prometheus = prometheus_client
+        self.config = config_manager
     
-    def _initialize_prometheus(self):
-        """Initialize Prometheus connection"""
-        self.prometheus_url = auth.prometheus_url
-        self.prometheus_token = auth.prometheus_token
-    
-    async def _query_prometheus(self, query: str, start_time: Optional[datetime] = None, 
-                               end_time: Optional[datetime] = None, step: str = '1m') -> Optional[Dict[str, Any]]:
-        """Execute Prometheus query"""
+    def get_network_rx_bytes(self, 
+                            start_time: datetime, 
+                            end_time: datetime, 
+                            step: str = '1m') -> Dict[str, Any]:
+        """Get network receive bytes per second."""
+        query = self.config.get_metric_query('network_metrics', 'rx_bytes')
+        if not query:
+            query = 'rate(node_network_receive_bytes_total{device!="lo"}[5m])'
+        
         try:
-            if not self.prometheus_url or not self.prometheus_token:
-                # Try to reinitialize
-                self.prometheus_url, self.prometheus_token = await auth.initialize_prometheus_connection()
-                if not self.prometheus_url or not self.prometheus_token:
-                    logger.error("Prometheus connection not available")
-                    return None
+            result = self.prometheus.query_range(query, start_time, end_time, step)
+            formatted_result = self.prometheus.format_query_result(result)
             
-            headers = {
-                'Authorization': f'Bearer {self.prometheus_token}',
-                'Content-Type': 'application/json'
-            }
+            # Group by node and device
+            nodes_data = {}
+            for item in formatted_result['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
+                
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
+                
+                # Convert bytes to MB/s for easier reading
+                values_mb = [{'timestamp': v['timestamp'], 'value': v['value'] / (1024 * 1024)} for v in item['values']]
+                stats = self.prometheus.calculate_statistics([{'values': [(v['timestamp'], v['value']) for v in values_mb]}])
+                
+                nodes_data[instance][device] = {
+                    'metric_labels': item['metric'],
+                    'values': values_mb,
+                    'statistics': stats,
+                    'unit': 'MB/s'
+                }
             
-            # Prepare query parameters
-            params = {'query': query}
-            
-            if start_time and end_time:
-                # Range query
-                endpoint = f"{self.prometheus_url}/api/v1/query_range"
-                params.update({
-                    'start': start_time.timestamp(),
-                    'end': end_time.timestamp(),
+            return {
+                'query': query,
+                'metric_type': 'network_rx_bytes_per_second',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
                     'step': step
-                })
-            else:
-                # Instant query
-                endpoint = f"{self.prometheus_url}/api/v1/query"
-                if end_time:
-                    params['time'] = end_time.timestamp()
-            
-            response = requests.get(
-                endpoint,
-                headers=headers,
-                params=params,
-                verify=False,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('status') == 'success':
-                    return data
-                else:
-                    logger.error(f"Prometheus query failed: {data.get('error', 'Unknown error')}")
-            else:
-                logger.error(f"Prometheus request failed: {response.status_code} - {response.text}")
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error querying Prometheus: {e}")
-            return None
-    
-    def _calculate_stats(self, values: List[float]) -> Dict[str, float]:
-        """Calculate min, mean, max statistics from values"""
-        if not values:
-            return {'min': 0.0, 'mean': 0.0, 'max': 0.0, 'count': 0}
-        
-        return {
-            'min': min(values),
-            'mean': sum(values) / len(values),
-            'max': max(values),
-            'count': len(values)
-        }
-    
-    async def get_network_throughput_metrics(self, duration_hours: int = 1) -> Dict[str, Any]:
-        """Get network throughput metrics (RX/TX bytes and packets)"""
-        try:
-            end_time = datetime.utcnow()
-            start_time = end_time - timedelta(hours=duration_hours)
-            
-            # Get network queries from config
-            rx_bytes_query = config.get_metric_query('network', 'receive_bytes')
-            tx_bytes_query = config.get_metric_query('network', 'transmit_bytes')
-            rx_packets_query = config.get_metric_query('network', 'receive_packets')
-            tx_packets_query = config.get_metric_query('network', 'transmit_packets')
-            
-            if not all([rx_bytes_query, tx_bytes_query, rx_packets_query, tx_packets_query]):
-                return {'error': 'Network throughput queries not properly configured'}
-            
-            # Execute queries concurrently
-            tasks = [
-                self._query_prometheus(rx_bytes_query, start_time, end_time),
-                self._query_prometheus(tx_bytes_query, start_time, end_time),
-                self._query_prometheus(rx_packets_query, start_time, end_time),
-                self._query_prometheus(tx_packets_query, start_time, end_time)
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            rx_bytes_result, tx_bytes_result, rx_packets_result, tx_packets_result = results
-            
-            # Process results
-            metrics = {
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'duration_hours': duration_hours,
-                'rx_bytes': self._process_network_metric_result(rx_bytes_result, 'bytes_per_second'),
-                'tx_bytes': self._process_network_metric_result(tx_bytes_result, 'bytes_per_second'),
-                'rx_packets': self._process_network_metric_result(rx_packets_result, 'packets_per_second'),
-                'tx_packets': self._process_network_metric_result(tx_packets_result, 'packets_per_second')
+                },
+                'nodes': nodes_data,
+                'cluster_statistics': formatted_result['statistics'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
-            
-            # Add baseline comparison
-            baselines = config.get_network_baselines()
-            metrics['baseline_comparison'] = self._compare_with_network_baseline(metrics, baselines)
-            
-            return metrics
-            
+        
         except Exception as e:
-            logger.error(f"Error getting network throughput metrics: {e}")
-            return {'error': str(e)}
+            logger.error(f"Failed to get network RX bytes: {e}")
+            raise
     
-    async def get_network_packet_loss_metrics(self, duration_hours: int = 1) -> Dict[str, Any]:
-        """Get network packet loss metrics"""
+    def get_network_tx_bytes(self, 
+                            start_time: datetime, 
+                            end_time: datetime, 
+                            step: str = '1m') -> Dict[str, Any]:
+        """Get network transmit bytes per second."""
+        query = self.config.get_metric_query('network_metrics', 'tx_bytes')
+        if not query:
+            query = 'rate(node_network_transmit_bytes_total{device!="lo"}[5m])'
+        
         try:
-            end_time = datetime.utcnow()
-            start_time = end_time - timedelta(hours=duration_hours)
+            result = self.prometheus.query_range(query, start_time, end_time, step)
+            formatted_result = self.prometheus.format_query_result(result)
             
-            # Get packet loss query from config
-            packet_loss_query = config.get_metric_query('network', 'packet_loss')
-            
-            if not packet_loss_query:
-                return {'error': 'Network packet loss query not configured'}
-            
-            result = await self._query_prometheus(packet_loss_query, start_time, end_time)
-            
-            if not result:
-                return {'error': 'Failed to query Prometheus for packet loss'}
-            
-            # Process packet loss results
-            metrics = {
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'duration_hours': duration_hours,
-                'packet_loss': self._process_network_metric_result(result, 'packets_per_second_dropped')
-            }
-            
-            return metrics
-            
-        except Exception as e:
-            logger.error(f"Error getting network packet loss metrics: {e}")
-            return {'error': str(e)}
-    
-    def _process_network_metric_result(self, result: Any, unit: str) -> Dict[str, Any]:
-        """Process Prometheus result for network metrics"""
-        if isinstance(result, Exception) or not result:
-            return {'error': 'Failed to query metric', 'unit': unit}
-        
-        interface_stats = {}
-        all_values = []
-        
-        for series in result['data']['result']:
-            device = series['metric'].get('device', 'unknown')
-            instance = series['metric'].get('instance', 'unknown')
-            interface_key = f"{instance}:{device}"
-            
-            # Skip loopback and other non-physical interfaces
-            if device in ['lo', 'docker0'] or device.startswith('veth'):
-                continue
-            
-            values = []
-            if 'values' in series:
-                for value_pair in series['values']:
-                    try:
-                        value = float(value_pair[1])
-                        values.append(value)
-                        all_values.append(value)
-                    except (ValueError, IndexError):
-                        continue
-            
-            if values:
-                interface_stats[interface_key] = self._calculate_stats(values)
-        
-        overall_stats = self._calculate_stats(all_values)
-        
-        return {
-            'unit': unit,
-            'overall_stats': overall_stats,
-            'interface_stats': interface_stats,
-            'interface_count': len(interface_stats)
-        }
-    
-    def _compare_with_network_baseline(self, metrics: Dict[str, Any], baselines: Dict[str, float]) -> Dict[str, Any]:
-        """Compare network metrics with baseline values"""
-        try:
-            comparison = {
-                'baselines': baselines,
-                'within_thresholds': True,
-                'issues': [],
-                'performance_summary': {}
-            }
-            
-            # Check RX throughput (convert bytes/sec to MB/sec)
-            if 'rx_bytes' in metrics and 'overall_stats' in metrics['rx_bytes']:
-                avg_bytes_per_sec = metrics['rx_bytes']['overall_stats'].get('mean', 0)
-                avg_mb_per_sec = avg_bytes_per_sec / (1024 * 1024)
-                comparison['performance_summary']['avg_rx_mbps'] = round(avg_mb_per_sec, 2)
+            # Group by node and device
+            nodes_data = {}
+            for item in formatted_result['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
                 
-                if avg_mb_per_sec < baselines['rx_baseline']:
-                    comparison['within_thresholds'] = False
-                    comparison['issues'].append({
-                        'metric': 'rx_throughput',
-                        'current_mbps': avg_mb_per_sec,
-                        'baseline_mbps': baselines['rx_baseline'],
-                        'status': 'below_baseline'
-                    })
-            
-            # Check TX throughput
-            if 'tx_bytes' in metrics and 'overall_stats' in metrics['tx_bytes']:
-                avg_bytes_per_sec = metrics['tx_bytes']['overall_stats'].get('mean', 0)
-                avg_mb_per_sec = avg_bytes_per_sec / (1024 * 1024)
-                comparison['performance_summary']['avg_tx_mbps'] = round(avg_mb_per_sec, 2)
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
                 
-                if avg_mb_per_sec < baselines['tx_baseline']:
-                    comparison['within_thresholds'] = False
-                    comparison['issues'].append({
-                        'metric': 'tx_throughput',
-                        'current_mbps': avg_mb_per_sec,
-                        'baseline_mbps': baselines['tx_baseline'],
-                        'status': 'below_baseline'
-                    })
-            
-            # Check combined throughput against max throughput
-            total_mbps = comparison['performance_summary'].get('avg_rx_mbps', 0) + \
-                        comparison['performance_summary'].get('avg_tx_mbps', 0)
-            
-            if total_mbps > baselines['max_throughput_mbps']:
-                comparison['issues'].append({
-                    'metric': 'total_throughput',
-                    'current_mbps': total_mbps,
-                    'max_throughput_mbps': baselines['max_throughput_mbps'],
-                    'status': 'exceeds_maximum'
-                })
-            
-            comparison['performance_summary']['total_throughput_mbps'] = round(total_mbps, 2)
-            
-            return comparison
-            
-        except Exception as e:
-            logger.error(f"Error comparing with network baseline: {e}")
-            return {'error': str(e)}
-    
-    async def get_combined_network_metrics(self, duration_hours: int = 1) -> Dict[str, Any]:
-        """Get combined network metrics including throughput and packet loss"""
-        try:
-            throughput_task = self.get_network_throughput_metrics(duration_hours)
-            packet_loss_task = self.get_network_packet_loss_metrics(duration_hours)
-            
-            throughput_result, packet_loss_result = await asyncio.gather(
-                throughput_task, packet_loss_task, return_exceptions=True
-            )
+                # Convert bytes to MB/s for easier reading
+                values_mb = [{'timestamp': v['timestamp'], 'value': v['value'] / (1024 * 1024)} for v in item['values']]
+                stats = self.prometheus.calculate_statistics([{'values': [(v['timestamp'], v['value']) for v in values_mb]}])
+                
+                nodes_data[instance][device] = {
+                    'metric_labels': item['metric'],
+                    'values': values_mb,
+                    'statistics': stats,
+                    'unit': 'MB/s'
+                }
             
             return {
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'duration_hours': duration_hours,
-                'throughput_metrics': throughput_result if not isinstance(throughput_result, Exception) else {'error': str(throughput_result)},
-                'packet_loss_metrics': packet_loss_result if not isinstance(packet_loss_result, Exception) else {'error': str(packet_loss_result)},
-                'summary': self._generate_network_summary(throughput_result, packet_loss_result)
+                'query': query,
+                'metric_type': 'network_tx_bytes_per_second',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'step': step
+                },
+                'nodes': nodes_data,
+                'cluster_statistics': formatted_result['statistics'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
-            
+        
         except Exception as e:
-            logger.error(f"Error getting combined network metrics: {e}")
-            return {'error': str(e)}
+            logger.error(f"Failed to get network TX bytes: {e}")
+            raise
     
-    def _generate_network_summary(self, throughput_metrics: Any, packet_loss_metrics: Any) -> Dict[str, Any]:
-        """Generate summary of network performance"""
+    def get_network_rx_packets(self, 
+                              start_time: datetime, 
+                              end_time: datetime, 
+                              step: str = '1m') -> Dict[str, Any]:
+        """Get network receive packets per second."""
+        query = self.config.get_metric_query('network_metrics', 'rx_packets')
+        if not query:
+            query = 'rate(node_network_receive_packets_total{device!="lo"}[5m])'
+        
         try:
-            summary = {
-                'overall_status': 'healthy',
-                'issues_detected': [],
-                'performance_indicators': {}
-            }
+            result = self.prometheus.query_range(query, start_time, end_time, step)
+            formatted_result = self.prometheus.format_query_result(result)
             
-            # Check throughput performance
-            if (not isinstance(throughput_metrics, Exception) and 
-                'baseline_comparison' in throughput_metrics):
+            # Group by node and device
+            nodes_data = {}
+            for item in formatted_result['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
                 
-                comparison = throughput_metrics['baseline_comparison']
-                if not comparison.get('within_thresholds', True):
-                    summary['overall_status'] = 'degraded'
-                    summary['issues_detected'].extend([
-                        f"{issue['metric']}: {issue['status']}" 
-                        for issue in comparison.get('issues', [])
-                    ])
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
                 
-                # Extract performance indicators
-                perf_summary = comparison.get('performance_summary', {})
-                summary['performance_indicators'].update(perf_summary)
-            
-            # Check packet loss
-            if (not isinstance(packet_loss_metrics, Exception) and 
-                'packet_loss' in packet_loss_metrics):
-                
-                packet_loss_stats = packet_loss_metrics['packet_loss'].get('overall_stats', {})
-                avg_packet_loss = packet_loss_stats.get('mean', 0)
-                max_packet_loss = packet_loss_stats.get('max', 0)
-                
-                summary['performance_indicators']['avg_packet_loss_per_sec'] = round(avg_packet_loss, 2)
-                summary['performance_indicators']['max_packet_loss_per_sec'] = round(max_packet_loss, 2)
-                
-                # Check against baseline
-                baselines = config.get_network_baselines()
-                if avg_packet_loss > baselines.get('packet_loss_threshold', 0.1):
-                    summary['overall_status'] = 'degraded'
-                    summary['issues_detected'].append('packet_loss: above_threshold')
-            
-            return summary
-            
-        except Exception as e:
-            logger.error(f"Error generating network summary: {e}")
-            return {'error': str(e)}
-    
-    async def get_network_utilization_by_interface(self, duration_hours: int = 1) -> Dict[str, Any]:
-        """Get network utilization broken down by interface"""
-        try:
-            combined_metrics = await self.get_combined_network_metrics(duration_hours)
-            
-            if 'error' in combined_metrics:
-                return combined_metrics
-            
-            interfaces_summary = {}
-            
-            # Process throughput metrics by interface
-            throughput_metrics = combined_metrics.get('throughput_metrics', {})
-            
-            # RX bytes by interface
-            rx_interfaces = throughput_metrics.get('rx_bytes', {}).get('interface_stats', {})
-            for interface_key, stats in rx_interfaces.items():
-                if interface_key not in interfaces_summary:
-                    interfaces_summary[interface_key] = {'interface_key': interface_key}
-                
-                interfaces_summary[interface_key]['rx_stats'] = stats
-                interfaces_summary[interface_key]['rx_mbps'] = round(stats.get('mean', 0) / (1024 * 1024), 2)
-            
-            # TX bytes by interface
-            tx_interfaces = throughput_metrics.get('tx_bytes', {}).get('interface_stats', {})
-            for interface_key, stats in tx_interfaces.items():
-                if interface_key not in interfaces_summary:
-                    interfaces_summary[interface_key] = {'interface_key': interface_key}
-                
-                interfaces_summary[interface_key]['tx_stats'] = stats
-                interfaces_summary[interface_key]['tx_mbps'] = round(stats.get('mean', 0) / (1024 * 1024), 2)
-            
-            # Add packet data
-            rx_packet_interfaces = throughput_metrics.get('rx_packets', {}).get('interface_stats', {})
-            for interface_key, stats in rx_packet_interfaces.items():
-                if interface_key in interfaces_summary:
-                    interfaces_summary[interface_key]['rx_packets_per_sec'] = round(stats.get('mean', 0), 2)
-            
-            tx_packet_interfaces = throughput_metrics.get('tx_packets', {}).get('interface_stats', {})
-            for interface_key, stats in tx_packet_interfaces.items():
-                if interface_key in interfaces_summary:
-                    interfaces_summary[interface_key]['tx_packets_per_sec'] = round(stats.get('mean', 0), 2)
-            
-            # Calculate total utilization per interface
-            for interface_key, interface_data in interfaces_summary.items():
-                total_mbps = interface_data.get('rx_mbps', 0) + interface_data.get('tx_mbps', 0)
-                interfaces_summary[interface_key]['total_mbps'] = round(total_mbps, 2)
+                stats = self.prometheus.calculate_statistics([item])
+                nodes_data[instance][device] = {
+                    'metric_labels': item['metric'],
+                    'values': item['values'],
+                    'statistics': stats,
+                    'unit': 'packets/s'
+                }
             
             return {
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'duration_hours': duration_hours,
-                'interfaces': list(interfaces_summary.values()),
-                'interface_count': len(interfaces_summary)
+                'query': query,
+                'metric_type': 'network_rx_packets_per_second',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'step': step
+                },
+                'nodes': nodes_data,
+                'cluster_statistics': formatted_result['statistics'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
-            
+        
         except Exception as e:
-            logger.error(f"Error getting network utilization by interface: {e}")
-            return {'error': str(e)}
+            logger.error(f"Failed to get network RX packets: {e}")
+            raise
+    
+    def get_network_tx_packets(self, 
+                              start_time: datetime, 
+                              end_time: datetime, 
+                              step: str = '1m') -> Dict[str, Any]:
+        """Get network transmit packets per second."""
+        query = self.config.get_metric_query('network_metrics', 'tx_packets')
+        if not query:
+            query = 'rate(node_network_transmit_packets_total{device!="lo"}[5m])'
+        
+        try:
+            result = self.prometheus.query_range(query, start_time, end_time, step)
+            formatted_result = self.prometheus.format_query_result(result)
+            
+            # Group by node and device
+            nodes_data = {}
+            for item in formatted_result['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
+                
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
+                
+                stats = self.prometheus.calculate_statistics([item])
+                nodes_data[instance][device] = {
+                    'metric_labels': item['metric'],
+                    'values': item['values'],
+                    'statistics': stats,
+                    'unit': 'packets/s'
+                }
+            
+            return {
+                'query': query,
+                'metric_type': 'network_tx_packets_per_second',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'step': step
+                },
+                'nodes': nodes_data,
+                'cluster_statistics': formatted_result['statistics'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to get network TX packets: {e}")
+            raise
+    
+    def get_network_errors(self, 
+                          start_time: datetime, 
+                          end_time: datetime, 
+                          step: str = '1m') -> Dict[str, Any]:
+        """Get network error rates."""
+        rx_errors_query = self.config.get_metric_query('network_metrics', 'rx_errors')
+        tx_errors_query = self.config.get_metric_query('network_metrics', 'tx_errors')
+        
+        if not rx_errors_query:
+            rx_errors_query = 'rate(node_network_receive_errs_total{device!="lo"}[5m])'
+        if not tx_errors_query:
+            tx_errors_query = 'rate(node_network_transmit_errs_total{device!="lo"}[5m])'
+        
+        try:
+            # Get RX errors
+            rx_result = self.prometheus.query_range(rx_errors_query, start_time, end_time, step)
+            rx_formatted = self.prometheus.format_query_result(rx_result)
+            
+            # Get TX errors
+            tx_result = self.prometheus.query_range(tx_errors_query, start_time, end_time, step)
+            tx_formatted = self.prometheus.format_query_result(tx_result)
+            
+            # Combine error data by node and device
+            nodes_data = {}
+            
+            # Process RX errors
+            for item in rx_formatted['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
+                
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
+                if device not in nodes_data[instance]:
+                    nodes_data[instance][device] = {}
+                
+                stats = self.prometheus.calculate_statistics([item])
+                nodes_data[instance][device]['rx_errors'] = {
+                    'metric_labels': item['metric'],
+                    'values': item['values'],
+                    'statistics': stats,
+                    'unit': 'errors/s'
+                }
+            
+            # Process TX errors
+            for item in tx_formatted['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
+                
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
+                if device not in nodes_data[instance]:
+                    nodes_data[instance][device] = {}
+                
+                stats = self.prometheus.calculate_statistics([item])
+                nodes_data[instance][device]['tx_errors'] = {
+                    'metric_labels': item['metric'],
+                    'values': item['values'],
+                    'statistics': stats,
+                    'unit': 'errors/s'
+                }
+            
+            return {
+                'queries': {
+                    'rx_errors': rx_errors_query,
+                    'tx_errors': tx_errors_query
+                },
+                'metric_type': 'network_errors_per_second',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'step': step
+                },
+                'nodes': nodes_data,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to get network errors: {e}")
+            raise
+    
+    def collect_network_metrics(self, 
+                               duration_hours: float = 1.0, 
+                               step: str = '1m') -> Dict[str, Any]:
+        """Collect comprehensive network metrics.
+        
+        Args:
+            duration_hours: Duration in hours to collect data for
+            step: Query resolution step
+        
+        Returns:
+            Dictionary containing network metrics and analysis
+        """
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(hours=duration_hours)
+        
+        try:
+            # Collect all network metrics
+            rx_bytes_data = self.get_network_rx_bytes(start_time, end_time, step)
+            tx_bytes_data = self.get_network_tx_bytes(start_time, end_time, step)
+            rx_packets_data = self.get_network_rx_packets(start_time, end_time, step)
+            tx_packets_data = self.get_network_tx_packets(start_time, end_time, step)
+            errors_data = self.get_network_errors(start_time, end_time, step)
+            
+            # Combine data by node and device
+            combined_data = {}
+            all_nodes = set()
+            
+            # Collect all nodes from different metrics
+            for data in [rx_bytes_data, tx_bytes_data, rx_packets_data, tx_packets_data]:
+                all_nodes.update(data.get('nodes', {}).keys())
+            all_nodes.update(errors_data.get('nodes', {}).keys())
+            
+            for node in all_nodes:
+                combined_data[node] = {'interfaces': {}}
+                
+                # Get all network interfaces for this node
+                all_interfaces = set()
+                for data in [rx_bytes_data, tx_bytes_data, rx_packets_data, tx_packets_data]:
+                    if node in data.get('nodes', {}):
+                        all_interfaces.update(data['nodes'][node].keys())
+                if node in errors_data.get('nodes', {}):
+                    all_interfaces.update(errors_data['nodes'][node].keys())
+                
+                for interface in all_interfaces:
+                    interface_data = {
+                        'rx_bytes': rx_bytes_data.get('nodes', {}).get(node, {}).get(interface, {}),
+                        'tx_bytes': tx_bytes_data.get('nodes', {}).get(node, {}).get(interface, {}),
+                        'rx_packets': rx_packets_data.get('nodes', {}).get(node, {}).get(interface, {}),
+                        'tx_packets': tx_packets_data.get('nodes', {}).get(node, {}).get(interface, {}),
+                        'errors': errors_data.get('nodes', {}).get(node, {}).get(interface, {})
+                    }
+                    combined_data[node]['interfaces'][interface] = interface_data
+            
+            # Get baselines for comparison
+            network_baselines = self.config.get_network_baselines()
+            
+            # Analyze performance against baselines
+            performance_analysis = self._analyze_network_performance(combined_data, network_baselines)
+            
+            return {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'collection_period': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'duration_hours': duration_hours,
+                    'step': step
+                },
+                'baselines': network_baselines,
+                'performance_analysis': performance_analysis,
+                'nodes': combined_data,
+                'queries_executed': {
+                    'rx_bytes': rx_bytes_data['query'],
+                    'tx_bytes': tx_bytes_data['query'],
+                    'rx_packets': rx_packets_data['query'],
+                    'tx_packets': tx_packets_data['query'],
+                    'rx_errors': errors_data['queries']['rx_errors'],
+                    'tx_errors': errors_data['queries']['tx_errors']
+                }
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to collect network metrics: {e}")
+            raise
+    
+    def _analyze_network_performance(self, 
+                                    network_data: Dict[str, Any], 
+                                    baselines: Dict[str, float]) -> Dict[str, Any]:
+        """Analyze network performance against baselines."""
+        analysis = {
+            'overall_status': 'normal',
+            'alerts': [],
+            'summary': {
+                'total_nodes': len(network_data),
+                'total_interfaces': sum(len(node_data['interfaces']) for node_data in network_data.values()),
+                'interfaces_with_errors': 0,
+                'low_throughput_interfaces': 0,
+                'high_utilization_interfaces': 0
+            }
+        }
+        
+        for node_name, node_data in network_data.items():
+            for interface_name, interface_data in node_data['interfaces'].items():
+                interface_id = f"{node_name}:{interface_name}"
+                
+                # Check for network errors
+                rx_errors_stats = interface_data.get('errors', {}).get('rx_errors', {}).get('statistics', {})
+                tx_errors_stats = interface_data.get('errors', {}).get('tx_errors', {}).get('statistics', {})
+                
+                if (rx_errors_stats.get('mean', 0) > 0 or tx_errors_stats.get('mean', 0) > 0):
+                    analysis['alerts'].append({
+                        'type': 'network_errors_detected',
+                        'interface': interface_id,
+                        'rx_errors_per_sec': rx_errors_stats.get('mean', 0),
+                        'tx_errors_per_sec': tx_errors_stats.get('mean', 0),
+                        'severity': 'warning'
+                    })
+                    analysis['summary']['interfaces_with_errors'] += 1
+                
+                # Check throughput
+                rx_throughput_stats = interface_data.get('rx_bytes', {}).get('statistics', {})
+                tx_throughput_stats = interface_data.get('tx_bytes', {}).get('statistics', {})
+                
+                # Check if throughput is below baseline (only if there's actual traffic)
+                if (rx_throughput_stats.get('mean', 0) < baselines.get('rx_baseline', 10) and 
+                    rx_throughput_stats.get('mean', 0) > 0.1):  # Ignore very low traffic
+                    analysis['alerts'].append({
+                        'type': 'low_rx_throughput',
+                        'interface': interface_id,
+                        'current_mbps': rx_throughput_stats.get('mean', 0),
+                        'baseline_mbps': baselines.get('rx_baseline', 10),
+                        'severity': 'info'
+                    })
+                    analysis['summary']['low_throughput_interfaces'] += 1
+                
+                if (tx_throughput_stats.get('mean', 0) < baselines.get('tx_baseline', 10) and 
+                    tx_throughput_stats.get('mean', 0) > 0.1):  # Ignore very low traffic
+                    analysis['alerts'].append({
+                        'type': 'low_tx_throughput',
+                        'interface': interface_id,
+                        'current_mbps': tx_throughput_stats.get('mean', 0),
+                        'baseline_mbps': baselines.get('tx_baseline', 10),
+                        'severity': 'info'
+                    })
+                    analysis['summary']['low_throughput_interfaces'] += 1
+                
+                # Check for high utilization (approaching max throughput)
+                max_throughput = baselines.get('max_throughput', 1000)  # 1Gbps default
+                total_throughput = (rx_throughput_stats.get('max', 0) + tx_throughput_stats.get('max', 0))
+                utilization_percent = (total_throughput / max_throughput) * 100
+                
+                if utilization_percent > 80:  # 80% utilization threshold
+                    analysis['alerts'].append({
+                        'type': 'high_network_utilization',
+                        'interface': interface_id,
+                        'utilization_percent': round(utilization_percent, 2),
+                        'total_throughput_mbps': total_throughput,
+                        'severity': 'warning' if utilization_percent > 90 else 'info'
+                    })
+                    analysis['summary']['high_utilization_interfaces'] += 1
+        
+        # Determine overall status
+        if analysis['summary']['interfaces_with_errors'] > 0:
+            analysis['overall_status'] = 'degraded'
+        
+        if analysis['summary']['high_utilization_interfaces'] > 0:
+            if analysis['overall_status'] == 'normal':
+                analysis['overall_status'] = 'stressed'
+        
+        if len(analysis['alerts']) == 0:
+            analysis['overall_status'] = 'optimal'
+        
+        return analysis
 
-# Global network metrics collector instance
-network_metrics_collector = NetworkMetricsCollector()
 
-async def get_network_metrics_json(duration_hours: int = 1) -> str:
-    """Get network metrics as JSON string"""
-    metrics = await network_metrics_collector.get_combined_network_metrics(duration_hours)
-    return json.dumps(metrics, indent=2)
+def get_network_metrics(duration_hours: float = 1.0, step: str = '1m') -> str:
+    """Get network metrics and return as JSON string.
+    
+    Args:
+        duration_hours: Duration in hours to collect data for (default: 1 hour)
+        step: Query resolution step (default: '1m')
+    
+    Returns:
+        JSON string containing network metrics data
+    """
+    collector = NetworkMetricsCollector()
+    metrics_data = collector.collect_network_metrics(duration_hours, step)
+    return json.dumps(metrics_data, indent=2)
 
-async def get_network_utilization_json(duration_hours: int = 1) -> str:
-    """Get network utilization by interface as JSON string"""
-    utilization = await network_metrics_collector.get_network_utilization_by_interface(duration_hours)
-    return json.dumps(utilization, indent=2)
+# Global network instance
+network = NetworkMetricsCollector()

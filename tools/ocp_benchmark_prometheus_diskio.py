@@ -1,474 +1,494 @@
-#!/usr/bin/env python3
-"""Prometheus Disk I/O Metrics Module"""
-
+"""Disk I/O metrics collection from Prometheus."""
 import json
 import logging
-from typing import Dict, Any, Optional, List
-from datetime import datetime, timedelta
-import requests
-import asyncio
-from config.ocp_benchmark_config import config
-from ocauth.ocp_benchmark_auth import auth
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, Optional
+from tools.ocp_benchmark_prometheus_basequery import prometheus_client
+from config.ocp_benchmark_config import config_manager
+
 
 logger = logging.getLogger(__name__)
 
+
 class DiskIOCollector:
-    """Collect disk I/O metrics from Prometheus"""
+    """Collects disk I/O metrics from Prometheus."""
     
     def __init__(self):
-        self.prometheus_url = None
-        self.prometheus_token = None
-        self._initialize_prometheus()
+        self.prometheus = prometheus_client
+        self.config = config_manager
     
-    def _initialize_prometheus(self):
-        """Initialize Prometheus connection"""
-        self.prometheus_url = auth.prometheus_url
-        self.prometheus_token = auth.prometheus_token
-    
-    async def _query_prometheus(self, query: str, start_time: Optional[datetime] = None, 
-                               end_time: Optional[datetime] = None, step: str = '1m') -> Optional[Dict[str, Any]]:
-        """Execute Prometheus query"""
+    def get_disk_read_bytes(self, 
+                           start_time: datetime, 
+                           end_time: datetime, 
+                           step: str = '1m') -> Dict[str, Any]:
+        """Get disk read bytes per second."""
+        query = self.config.get_metric_query('disk_metrics', 'read_bytes')
+        if not query:
+            query = 'rate(node_disk_read_bytes_total[5m])'
+        
         try:
-            if not self.prometheus_url or not self.prometheus_token:
-                # Try to reinitialize
-                self.prometheus_url, self.prometheus_token = await auth.initialize_prometheus_connection()
-                if not self.prometheus_url or not self.prometheus_token:
-                    logger.error("Prometheus connection not available")
-                    return None
+            result = self.prometheus.query_range(query, start_time, end_time, step)
+            formatted_result = self.prometheus.format_query_result(result)
             
-            headers = {
-                'Authorization': f'Bearer {self.prometheus_token}',
-                'Content-Type': 'application/json'
-            }
-            
-            # Prepare query parameters
-            params = {'query': query}
-            
-            if start_time and end_time:
-                # Range query
-                endpoint = f"{self.prometheus_url}/api/v1/query_range"
-                params.update({
-                    'start': start_time.timestamp(),
-                    'end': end_time.timestamp(),
-                    'step': step
-                })
-            else:
-                # Instant query
-                endpoint = f"{self.prometheus_url}/api/v1/query"
-                if end_time:
-                    params['time'] = end_time.timestamp()
-            
-            response = requests.get(
-                endpoint,
-                headers=headers,
-                params=params,
-                verify=False,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('status') == 'success':
-                    return data
-                else:
-                    logger.error(f"Prometheus query failed: {data.get('error', 'Unknown error')}")
-            else:
-                logger.error(f"Prometheus request failed: {response.status_code} - {response.text}")
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error querying Prometheus: {e}")
-            return None
-    
-    def _calculate_stats(self, values: List[float]) -> Dict[str, float]:
-        """Calculate min, mean, max statistics from values"""
-        if not values:
-            return {'min': 0.0, 'mean': 0.0, 'max': 0.0, 'count': 0}
-        
-        return {
-            'min': min(values),
-            'mean': sum(values) / len(values),
-            'max': max(values),
-            'count': len(values)
-        }
-    
-    async def get_disk_read_metrics(self, duration_hours: int = 1) -> Dict[str, Any]:
-        """Get disk read metrics (bytes and IOPS)"""
-        try:
-            end_time = datetime.utcnow()
-            start_time = end_time - timedelta(hours=duration_hours)
-            
-            # Get disk read queries from config
-            read_bytes_query = config.get_metric_query('disk_io', 'read_bytes')
-            read_iops_query = config.get_metric_query('disk_io', 'read_iops')
-            read_latency_query = config.get_metric_query('disk_io', 'read_latency')
-            
-            if not all([read_bytes_query, read_iops_query, read_latency_query]):
-                return {'error': 'Disk read queries not properly configured'}
-            
-            # Execute queries concurrently
-            tasks = [
-                self._query_prometheus(read_bytes_query, start_time, end_time),
-                self._query_prometheus(read_iops_query, start_time, end_time),
-                self._query_prometheus(read_latency_query, start_time, end_time)
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            bytes_result, iops_result, latency_result = results
-            
-            # Process results
-            metrics = {
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'duration_hours': duration_hours,
-                'read_bytes': self._process_disk_metric_result(bytes_result, 'bytes_per_second'),
-                'read_iops': self._process_disk_metric_result(iops_result, 'operations_per_second'),
-                'read_latency': self._process_disk_metric_result(latency_result, 'seconds', convert_to_ms=True)
-            }
-            
-            # Add baseline comparison
-            baselines = config.get_disk_baselines()
-            metrics['baseline_comparison'] = self._compare_with_disk_baseline(metrics, baselines, 'read')
-            
-            return metrics
-            
-        except Exception as e:
-            logger.error(f"Error getting disk read metrics: {e}")
-            return {'error': str(e)}
-    
-    async def get_disk_write_metrics(self, duration_hours: int = 1) -> Dict[str, Any]:
-        """Get disk write metrics (bytes and IOPS)"""
-        try:
-            end_time = datetime.utcnow()
-            start_time = end_time - timedelta(hours=duration_hours)
-            
-            # Get disk write queries from config
-            write_bytes_query = config.get_metric_query('disk_io', 'write_bytes')
-            write_iops_query = config.get_metric_query('disk_io', 'write_iops')
-            write_latency_query = config.get_metric_query('disk_io', 'write_latency')
-            
-            if not all([write_bytes_query, write_iops_query, write_latency_query]):
-                return {'error': 'Disk write queries not properly configured'}
-            
-            # Execute queries concurrently
-            tasks = [
-                self._query_prometheus(write_bytes_query, start_time, end_time),
-                self._query_prometheus(write_iops_query, start_time, end_time),
-                self._query_prometheus(write_latency_query, start_time, end_time)
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            bytes_result, iops_result, latency_result = results
-            
-            # Process results
-            metrics = {
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'duration_hours': duration_hours,
-                'write_bytes': self._process_disk_metric_result(bytes_result, 'bytes_per_second'),
-                'write_iops': self._process_disk_metric_result(iops_result, 'operations_per_second'),
-                'write_latency': self._process_disk_metric_result(latency_result, 'seconds', convert_to_ms=True)
-            }
-            
-            # Add baseline comparison
-            baselines = config.get_disk_baselines()
-            metrics['baseline_comparison'] = self._compare_with_disk_baseline(metrics, baselines, 'write')
-            
-            return metrics
-            
-        except Exception as e:
-            logger.error(f"Error getting disk write metrics: {e}")
-            return {'error': str(e)}
-    
-    def _process_disk_metric_result(self, result: Any, unit: str, convert_to_ms: bool = False) -> Dict[str, Any]:
-        """Process Prometheus result for disk metrics"""
-        if isinstance(result, Exception) or not result:
-            return {'error': 'Failed to query metric', 'unit': unit}
-        
-        device_stats = {}
-        all_values = []
-        
-        for series in result['data']['result']:
-            device = series['metric'].get('device', 'unknown')
-            instance = series['metric'].get('instance', 'unknown')
-            device_key = f"{instance}:{device}"
-            
-            values = []
-            if 'values' in series:
-                for value_pair in series['values']:
-                    try:
-                        value = float(value_pair[1])
-                        if convert_to_ms:
-                            value = value * 1000  # Convert seconds to milliseconds
-                        values.append(value)
-                        all_values.append(value)
-                    except (ValueError, IndexError):
-                        continue
-            
-            if values:
-                device_stats[device_key] = self._calculate_stats(values)
-        
-        overall_stats = self._calculate_stats(all_values)
-        
-        return {
-            'unit': 'milliseconds' if convert_to_ms else unit,
-            'overall_stats': overall_stats,
-            'device_stats': device_stats,
-            'device_count': len(device_stats)
-        }
-    
-    def _compare_with_disk_baseline(self, metrics: Dict[str, Any], baselines: Dict[str, float], 
-                                   operation_type: str) -> Dict[str, Any]:
-        """Compare disk metrics with baseline values"""
-        try:
-            comparison = {
-                'operation_type': operation_type,
-                'baselines': baselines,
-                'within_thresholds': True,
-                'issues': []
-            }
-            
-            if operation_type == 'read':
-                # Check read throughput (convert bytes/sec to MB/sec)
-                if 'read_bytes' in metrics and 'overall_stats' in metrics['read_bytes']:
-                    avg_bytes_per_sec = metrics['read_bytes']['overall_stats'].get('mean', 0)
-                    avg_mb_per_sec = avg_bytes_per_sec / (1024 * 1024)
-                    
-                    if avg_mb_per_sec < baselines['read_baseline']:
-                        comparison['within_thresholds'] = False
-                        comparison['issues'].append({
-                            'metric': 'read_throughput',
-                            'current_mb_per_sec': avg_mb_per_sec,
-                            'baseline_mb_per_sec': baselines['read_baseline'],
-                            'status': 'below_baseline'
-                        })
+            # Group by node and device
+            nodes_data = {}
+            for item in formatted_result['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
                 
-                # Check read IOPS
-                if 'read_iops' in metrics and 'overall_stats' in metrics['read_iops']:
-                    avg_iops = metrics['read_iops']['overall_stats'].get('mean', 0)
-                    
-                    if avg_iops < baselines['read_iops']:
-                        comparison['within_thresholds'] = False
-                        comparison['issues'].append({
-                            'metric': 'read_iops',
-                            'current_iops': avg_iops,
-                            'baseline_iops': baselines['read_iops'],
-                            'status': 'below_baseline'
-                        })
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
+                
+                # Convert bytes to MB/s for easier reading
+                values_mb = [{'timestamp': v['timestamp'], 'value': v['value'] / (1024 * 1024)} for v in item['values']]
+                stats = self.prometheus.calculate_statistics([{'values': [(v['timestamp'], v['value']) for v in values_mb]}])
+                
+                nodes_data[instance][device] = {
+                    'metric_labels': item['metric'],
+                    'values': values_mb,
+                    'statistics': stats,
+                    'unit': 'MB/s'
+                }
+            
+            return {
+                'query': query,
+                'metric_type': 'disk_read_bytes_per_second',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'step': step
+                },
+                'nodes': nodes_data,
+                'cluster_statistics': formatted_result['statistics'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to get disk read bytes: {e}")
+            raise
+    
+    def get_disk_write_bytes(self, 
+                            start_time: datetime, 
+                            end_time: datetime, 
+                            step: str = '1m') -> Dict[str, Any]:
+        """Get disk write bytes per second."""
+        query = self.config.get_metric_query('disk_metrics', 'write_bytes')
+        if not query:
+            query = 'rate(node_disk_written_bytes_total[5m])'
+        
+        try:
+            result = self.prometheus.query_range(query, start_time, end_time, step)
+            formatted_result = self.prometheus.format_query_result(result)
+            
+            # Group by node and device
+            nodes_data = {}
+            for item in formatted_result['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
+                
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
+                
+                # Convert bytes to MB/s for easier reading
+                values_mb = [{'timestamp': v['timestamp'], 'value': v['value'] / (1024 * 1024)} for v in item['values']]
+                stats = self.prometheus.calculate_statistics([{'values': [(v['timestamp'], v['value']) for v in values_mb]}])
+                
+                nodes_data[instance][device] = {
+                    'metric_labels': item['metric'],
+                    'values': values_mb,
+                    'statistics': stats,
+                    'unit': 'MB/s'
+                }
+            
+            return {
+                'query': query,
+                'metric_type': 'disk_write_bytes_per_second',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'step': step
+                },
+                'nodes': nodes_data,
+                'cluster_statistics': formatted_result['statistics'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to get disk write bytes: {e}")
+            raise
+    
+    def get_disk_read_iops(self, 
+                          start_time: datetime, 
+                          end_time: datetime, 
+                          step: str = '1m') -> Dict[str, Any]:
+        """Get disk read IOPS."""
+        query = self.config.get_metric_query('disk_metrics', 'read_iops')
+        if not query:
+            query = 'rate(node_disk_reads_completed_total[5m])'
+        
+        try:
+            result = self.prometheus.query_range(query, start_time, end_time, step)
+            formatted_result = self.prometheus.format_query_result(result)
+            
+            # Group by node and device
+            nodes_data = {}
+            for item in formatted_result['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
+                
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
+                
+                stats = self.prometheus.calculate_statistics([item])
+                nodes_data[instance][device] = {
+                    'metric_labels': item['metric'],
+                    'values': item['values'],
+                    'statistics': stats,
+                    'unit': 'ops/s'
+                }
+            
+            return {
+                'query': query,
+                'metric_type': 'disk_read_iops',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'step': step
+                },
+                'nodes': nodes_data,
+                'cluster_statistics': formatted_result['statistics'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to get disk read IOPS: {e}")
+            raise
+    
+    def get_disk_write_iops(self, 
+                           start_time: datetime, 
+                           end_time: datetime, 
+                           step: str = '1m') -> Dict[str, Any]:
+        """Get disk write IOPS."""
+        query = self.config.get_metric_query('disk_metrics', 'write_iops')
+        if not query:
+            query = 'rate(node_disk_writes_completed_total[5m])'
+        
+        try:
+            result = self.prometheus.query_range(query, start_time, end_time, step)
+            formatted_result = self.prometheus.format_query_result(result)
+            
+            # Group by node and device
+            nodes_data = {}
+            for item in formatted_result['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
+                
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
+                
+                stats = self.prometheus.calculate_statistics([item])
+                nodes_data[instance][device] = {
+                    'metric_labels': item['metric'],
+                    'values': item['values'],
+                    'statistics': stats,
+                    'unit': 'ops/s'
+                }
+            
+            return {
+                'query': query,
+                'metric_type': 'disk_write_iops',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'step': step
+                },
+                'nodes': nodes_data,
+                'cluster_statistics': formatted_result['statistics'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to get disk write IOPS: {e}")
+            raise
+    
+    def get_disk_read_latency(self, 
+                             start_time: datetime, 
+                             end_time: datetime, 
+                             step: str = '1m') -> Dict[str, Any]:
+        """Get disk read latency in milliseconds."""
+        query = self.config.get_metric_query('disk_metrics', 'read_latency')
+        if not query:
+            query = 'rate(node_disk_read_time_seconds_total[5m]) / rate(node_disk_reads_completed_total[5m]) * 1000'
+        
+        try:
+            result = self.prometheus.query_range(query, start_time, end_time, step)
+            formatted_result = self.prometheus.format_query_result(result)
+            
+            # Group by node and device
+            nodes_data = {}
+            for item in formatted_result['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
+                
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
+                
+                stats = self.prometheus.calculate_statistics([item])
+                nodes_data[instance][device] = {
+                    'metric_labels': item['metric'],
+                    'values': item['values'],
+                    'statistics': stats,
+                    'unit': 'ms'
+                }
+            
+            return {
+                'query': query,
+                'metric_type': 'disk_read_latency_ms',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'step': step
+                },
+                'nodes': nodes_data,
+                'cluster_statistics': formatted_result['statistics'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to get disk read latency: {e}")
+            raise
+    
+    def get_disk_write_latency(self, 
+                              start_time: datetime, 
+                              end_time: datetime, 
+                              step: str = '1m') -> Dict[str, Any]:
+        """Get disk write latency in milliseconds."""
+        query = self.config.get_metric_query('disk_metrics', 'write_latency')
+        if not query:
+            query = 'rate(node_disk_write_time_seconds_total[5m]) / rate(node_disk_writes_completed_total[5m]) * 1000'
+        
+        try:
+            result = self.prometheus.query_range(query, start_time, end_time, step)
+            formatted_result = self.prometheus.format_query_result(result)
+            
+            # Group by node and device
+            nodes_data = {}
+            for item in formatted_result['results']:
+                instance = item['metric'].get('instance', 'unknown').split(':')[0]
+                device = item['metric'].get('device', 'unknown')
+                
+                if instance not in nodes_data:
+                    nodes_data[instance] = {}
+                
+                stats = self.prometheus.calculate_statistics([item])
+                nodes_data[instance][device] = {
+                    'metric_labels': item['metric'],
+                    'values': item['values'],
+                    'statistics': stats,
+                    'unit': 'ms'
+                }
+            
+            return {
+                'query': query,
+                'metric_type': 'disk_write_latency_ms',
+                'time_range': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'step': step
+                },
+                'nodes': nodes_data,
+                'cluster_statistics': formatted_result['statistics'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to get disk write latency: {e}")
+            raise
+    
+    def collect_disk_metrics(self, 
+                            duration_hours: float = 1.0, 
+                            step: str = '1m') -> Dict[str, Any]:
+        """Collect comprehensive disk I/O metrics.
+        
+        Args:
+            duration_hours: Duration in hours to collect data for
+            step: Query resolution step
+        
+        Returns:
+            Dictionary containing disk I/O metrics and analysis
+        """
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(hours=duration_hours)
+        
+        try:
+            # Collect all disk metrics
+            read_bytes_data = self.get_disk_read_bytes(start_time, end_time, step)
+            write_bytes_data = self.get_disk_write_bytes(start_time, end_time, step)
+            read_iops_data = self.get_disk_read_iops(start_time, end_time, step)
+            write_iops_data = self.get_disk_write_iops(start_time, end_time, step)
+            read_latency_data = self.get_disk_read_latency(start_time, end_time, step)
+            write_latency_data = self.get_disk_write_latency(start_time, end_time, step)
+            
+            # Combine data by node and device
+            combined_data = {}
+            all_nodes = set()
+            
+            # Collect all nodes from different metrics
+            for data in [read_bytes_data, write_bytes_data, read_iops_data, 
+                        write_iops_data, read_latency_data, write_latency_data]:
+                all_nodes.update(data.get('nodes', {}).keys())
+            
+            for node in all_nodes:
+                combined_data[node] = {'devices': {}}
+                
+                # Get all devices for this node
+                all_devices = set()
+                for data in [read_bytes_data, write_bytes_data, read_iops_data, 
+                           write_iops_data, read_latency_data, write_latency_data]:
+                    if node in data.get('nodes', {}):
+                        all_devices.update(data['nodes'][node].keys())
+                
+                for device in all_devices:
+                    combined_data[node]['devices'][device] = {
+                        'read_throughput': read_bytes_data.get('nodes', {}).get(node, {}).get(device, {}),
+                        'write_throughput': write_bytes_data.get('nodes', {}).get(node, {}).get(device, {}),
+                        'read_iops': read_iops_data.get('nodes', {}).get(node, {}).get(device, {}),
+                        'write_iops': write_iops_data.get('nodes', {}).get(node, {}).get(device, {}),
+                        'read_latency': read_latency_data.get('nodes', {}).get(node, {}).get(device, {}),
+                        'write_latency': write_latency_data.get('nodes', {}).get(node, {}).get(device, {})
+                    }
+            
+            # Get baselines for comparison
+            disk_baselines = self.config.get_disk_baselines()
+            
+            # Analyze performance against baselines
+            performance_analysis = self._analyze_disk_performance(combined_data, disk_baselines)
+            
+            return {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'collection_period': {
+                    'start': start_time.isoformat(),
+                    'end': end_time.isoformat(),
+                    'duration_hours': duration_hours,
+                    'step': step
+                },
+                'baselines': disk_baselines,
+                'performance_analysis': performance_analysis,
+                'nodes': combined_data,
+                'queries_executed': {
+                    'read_bytes': read_bytes_data['query'],
+                    'write_bytes': write_bytes_data['query'],
+                    'read_iops': read_iops_data['query'],
+                    'write_iops': write_iops_data['query'],
+                    'read_latency': read_latency_data['query'],
+                    'write_latency': write_latency_data['query']
+                }
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to collect disk metrics: {e}")
+            raise
+    
+    def _analyze_disk_performance(self, 
+                                 disk_data: Dict[str, Any], 
+                                 baselines: Dict[str, float]) -> Dict[str, Any]:
+        """Analyze disk performance against baselines."""
+        analysis = {
+            'overall_status': 'normal',
+            'alerts': [],
+            'summary': {
+                'total_nodes': len(disk_data),
+                'total_devices': sum(len(node_data['devices']) for node_data in disk_data.values()),
+                'high_latency_devices': 0,
+                'low_throughput_devices': 0,
+                'low_iops_devices': 0
+            }
+        }
+        
+        for node_name, node_data in disk_data.items():
+            for device_name, device_data in node_data['devices'].items():
+                device_id = f"{node_name}:{device_name}"
                 
                 # Check read latency
-                if 'read_latency' in metrics and 'overall_stats' in metrics['read_latency']:
-                    avg_latency_ms = metrics['read_latency']['overall_stats'].get('mean', 0)
-                    
-                    if avg_latency_ms > baselines['read_latency_ms']:
-                        comparison['within_thresholds'] = False
-                        comparison['issues'].append({
-                            'metric': 'read_latency',
-                            'current_latency_ms': avg_latency_ms,
-                            'baseline_latency_ms': baselines['read_latency_ms'],
-                            'status': 'above_baseline'
-                        })
-            
-            elif operation_type == 'write':
-                # Check write throughput
-                if 'write_bytes' in metrics and 'overall_stats' in metrics['write_bytes']:
-                    avg_bytes_per_sec = metrics['write_bytes']['overall_stats'].get('mean', 0)
-                    avg_mb_per_sec = avg_bytes_per_sec / (1024 * 1024)
-                    
-                    if avg_mb_per_sec < baselines['write_baseline']:
-                        comparison['within_thresholds'] = False
-                        comparison['issues'].append({
-                            'metric': 'write_throughput',
-                            'current_mb_per_sec': avg_mb_per_sec,
-                            'baseline_mb_per_sec': baselines['write_baseline'],
-                            'status': 'below_baseline'
-                        })
-                
-                # Check write IOPS
-                if 'write_iops' in metrics and 'overall_stats' in metrics['write_iops']:
-                    avg_iops = metrics['write_iops']['overall_stats'].get('mean', 0)
-                    
-                    if avg_iops < baselines['write_iops']:
-                        comparison['within_thresholds'] = False
-                        comparison['issues'].append({
-                            'metric': 'write_iops',
-                            'current_iops': avg_iops,
-                            'baseline_iops': baselines['write_iops'],
-                            'status': 'below_baseline'
-                        })
+                read_latency_stats = device_data.get('read_latency', {}).get('statistics', {})
+                if read_latency_stats.get('mean', 0) > baselines.get('peak_latency', 50):
+                    analysis['alerts'].append({
+                        'type': 'high_read_latency',
+                        'device': device_id,
+                        'current': read_latency_stats.get('mean', 0),
+                        'baseline': baselines.get('peak_latency', 50),
+                        'severity': 'warning'
+                    })
+                    analysis['summary']['high_latency_devices'] += 1
                 
                 # Check write latency
-                if 'write_latency' in metrics and 'overall_stats' in metrics['write_latency']:
-                    avg_latency_ms = metrics['write_latency']['overall_stats'].get('mean', 0)
-                    
-                    if avg_latency_ms > baselines.get('write_latency_ms', baselines.get('write_latency_ms', float('inf'))):
-                        comparison['within_thresholds'] = False
-                        comparison['issues'].append({
-                            'metric': 'write_latency',
-                            'current_latency_ms': avg_latency_ms,
-                            'baseline_latency_ms': baselines.get('write_latency_ms', 0),
-                            'status': 'above_baseline'
-                        })
-            
-            return comparison
-            
-        except Exception as e:
-            logger.error(f"Error comparing with disk baseline: {e}")
-            return {'error': str(e)}
-    
-    async def get_combined_disk_metrics(self, duration_hours: int = 1) -> Dict[str, Any]:
-        """Get combined disk read and write metrics"""
-        try:
-            read_task = self.get_disk_read_metrics(duration_hours)
-            write_task = self.get_disk_write_metrics(duration_hours)
-            
-            read_result, write_result = await asyncio.gather(read_task, write_task)
-            
-            return {
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'duration_hours': duration_hours,
-                'disk_read_metrics': read_result,
-                'disk_write_metrics': write_result,
-                'summary': self._generate_disk_summary(read_result, write_result)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting combined disk metrics: {e}")
-            return {'error': str(e)}
-    
-    def _generate_disk_summary(self, read_metrics: Dict[str, Any], write_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate summary of disk I/O performance"""
-        try:
-            summary = {
-                'overall_status': 'healthy',
-                'issues_detected': [],
-                'performance_indicators': {}
-            }
-            
-            # Check read performance
-            if 'baseline_comparison' in read_metrics:
-                read_comparison = read_metrics['baseline_comparison']
-                if not read_comparison.get('within_thresholds', True):
-                    summary['overall_status'] = 'degraded'
-                    summary['issues_detected'].extend([
-                        f"Read {issue['metric']}: {issue['status']}" 
-                        for issue in read_comparison.get('issues', [])
-                    ])
-            
-            # Check write performance
-            if 'baseline_comparison' in write_metrics:
-                write_comparison = write_metrics['baseline_comparison']
-                if not write_comparison.get('within_thresholds', True):
-                    summary['overall_status'] = 'degraded'
-                    summary['issues_detected'].extend([
-                        f"Write {issue['metric']}: {issue['status']}" 
-                        for issue in write_comparison.get('issues', [])
-                    ])
-            
-            # Extract key performance indicators
-            if 'read_bytes' in read_metrics and 'overall_stats' in read_metrics['read_bytes']:
-                read_mbps = read_metrics['read_bytes']['overall_stats'].get('mean', 0) / (1024 * 1024)
-                summary['performance_indicators']['avg_read_mbps'] = round(read_mbps, 2)
-            
-            if 'write_bytes' in write_metrics and 'overall_stats' in write_metrics['write_bytes']:
-                write_mbps = write_metrics['write_bytes']['overall_stats'].get('mean', 0) / (1024 * 1024)
-                summary['performance_indicators']['avg_write_mbps'] = round(write_mbps, 2)
-            
-            if 'read_iops' in read_metrics and 'overall_stats' in read_metrics['read_iops']:
-                summary['performance_indicators']['avg_read_iops'] = round(
-                    read_metrics['read_iops']['overall_stats'].get('mean', 0), 2
-                )
-            
-            if 'write_iops' in write_metrics and 'overall_stats' in write_metrics['write_iops']:
-                summary['performance_indicators']['avg_write_iops'] = round(
-                    write_metrics['write_iops']['overall_stats'].get('mean', 0), 2
-                )
-            
-            if 'read_latency' in read_metrics and 'overall_stats' in read_metrics['read_latency']:
-                summary['performance_indicators']['avg_read_latency_ms'] = round(
-                    read_metrics['read_latency']['overall_stats'].get('mean', 0), 2
-                )
-            
-            if 'write_latency' in write_metrics and 'overall_stats' in write_metrics['write_latency']:
-                summary['performance_indicators']['avg_write_latency_ms'] = round(
-                    write_metrics['write_latency']['overall_stats'].get('mean', 0), 2
-                )
-            
-            return summary
-            
-        except Exception as e:
-            logger.error(f"Error generating disk summary: {e}")
-            return {'error': str(e)}
-    
-    async def get_disk_utilization_by_device(self, duration_hours: int = 1) -> Dict[str, Any]:
-        """Get disk utilization broken down by device"""
-        try:
-            combined_metrics = await self.get_combined_disk_metrics(duration_hours)
-            
-            if 'error' in combined_metrics:
-                return combined_metrics
-            
-            devices_summary = {}
-            
-            # Process read metrics by device
-            read_devices = combined_metrics.get('disk_read_metrics', {}).get('read_bytes', {}).get('device_stats', {})
-            for device_key, stats in read_devices.items():
-                if device_key not in devices_summary:
-                    devices_summary[device_key] = {'device_key': device_key}
+                write_latency_stats = device_data.get('write_latency', {}).get('statistics', {})
+                if write_latency_stats.get('mean', 0) > baselines.get('peak_latency', 50):
+                    analysis['alerts'].append({
+                        'type': 'high_write_latency',
+                        'device': device_id,
+                        'current': write_latency_stats.get('mean', 0),
+                        'baseline': baselines.get('peak_latency', 50),
+                        'severity': 'warning'
+                    })
+                    analysis['summary']['high_latency_devices'] += 1
                 
-                devices_summary[device_key]['read_stats'] = stats
-                devices_summary[device_key]['read_mbps'] = round(stats.get('mean', 0) / (1024 * 1024), 2)
-            
-            # Process write metrics by device
-            write_devices = combined_metrics.get('disk_write_metrics', {}).get('write_bytes', {}).get('device_stats', {})
-            for device_key, stats in write_devices.items():
-                if device_key not in devices_summary:
-                    devices_summary[device_key] = {'device_key': device_key}
+                # Check read throughput
+                read_throughput_stats = device_data.get('read_throughput', {}).get('statistics', {})
+                if read_throughput_stats.get('mean', 0) < baselines.get('read_baseline', 100) and read_throughput_stats.get('mean', 0) > 0:
+                    analysis['alerts'].append({
+                        'type': 'low_read_throughput',
+                        'device': device_id,
+                        'current': read_throughput_stats.get('mean', 0),
+                        'baseline': baselines.get('read_baseline', 100),
+                        'severity': 'info'
+                    })
+                    analysis['summary']['low_throughput_devices'] += 1
                 
-                devices_summary[device_key]['write_stats'] = stats
-                devices_summary[device_key]['write_mbps'] = round(stats.get('mean', 0) / (1024 * 1024), 2)
-            
-            # Add IOPS data
-            read_iops_devices = combined_metrics.get('disk_read_metrics', {}).get('read_iops', {}).get('device_stats', {})
-            for device_key, stats in read_iops_devices.items():
-                if device_key in devices_summary:
-                    devices_summary[device_key]['read_iops'] = round(stats.get('mean', 0), 2)
-            
-            write_iops_devices = combined_metrics.get('disk_write_metrics', {}).get('write_iops', {}).get('device_stats', {})
-            for device_key, stats in write_iops_devices.items():
-                if device_key in devices_summary:
-                    devices_summary[device_key]['write_iops'] = round(stats.get('mean', 0), 2)
-            
-            # Add latency data
-            read_latency_devices = combined_metrics.get('disk_read_metrics', {}).get('read_latency', {}).get('device_stats', {})
-            for device_key, stats in read_latency_devices.items():
-                if device_key in devices_summary:
-                    devices_summary[device_key]['read_latency_ms'] = round(stats.get('mean', 0), 2)
-            
-            write_latency_devices = combined_metrics.get('disk_write_metrics', {}).get('write_latency', {}).get('device_stats', {})
-            for device_key, stats in write_latency_devices.items():
-                if device_key in devices_summary:
-                    devices_summary[device_key]['write_latency_ms'] = round(stats.get('mean', 0), 2)
-            
-            return {
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'duration_hours': duration_hours,
-                'devices': list(devices_summary.values()),
-                'device_count': len(devices_summary)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting disk utilization by device: {e}")
-            return {'error': str(e)}
+                # Check write throughput
+                write_throughput_stats = device_data.get('write_throughput', {}).get('statistics', {})
+                if write_throughput_stats.get('mean', 0) < baselines.get('write_baseline', 50) and write_throughput_stats.get('mean', 0) > 0:
+                    analysis['alerts'].append({
+                        'type': 'low_write_throughput',
+                        'device': device_id,
+                        'current': write_throughput_stats.get('mean', 0),
+                        'baseline': baselines.get('write_baseline', 50),
+                        'severity': 'info'
+                    })
+                    analysis['summary']['low_throughput_devices'] += 1
+                
+                # Check IOPS
+                read_iops_stats = device_data.get('read_iops', {}).get('statistics', {})
+                write_iops_stats = device_data.get('write_iops', {}).get('statistics', {})
+                
+                if (read_iops_stats.get('mean', 0) < baselines.get('read_iops', 10000) and 
+                    read_iops_stats.get('mean', 0) > 0):
+                    analysis['summary']['low_iops_devices'] += 1
+                
+                if (write_iops_stats.get('mean', 0) < baselines.get('write_iops', 8000) and 
+                    write_iops_stats.get('mean', 0) > 0):
+                    analysis['summary']['low_iops_devices'] += 1
+        
+        # Determine overall status
+        if analysis['summary']['high_latency_devices'] > 0:
+            analysis['overall_status'] = 'degraded'
+        
+        if len(analysis['alerts']) == 0:
+            analysis['overall_status'] = 'optimal'
+        
+        return analysis
 
-# Global disk I/O collector instance
-disk_io_collector = DiskIOCollector()
 
-async def get_disk_metrics_json(duration_hours: int = 1) -> str:
-    """Get disk I/O metrics as JSON string"""
-    metrics = await disk_io_collector.get_combined_disk_metrics(duration_hours)
-    return json.dumps(metrics, indent=2)
-
-async def get_disk_utilization_json(duration_hours: int = 1) -> str:
-    """Get disk utilization by device as JSON string"""
-    utilization = await disk_io_collector.get_disk_utilization_by_device(duration_hours)
-    return json.dumps(utilization, indent=2)
+def get_disk_metrics(duration_hours: float = 1.0, step: str = '1m') -> str:
+    """Get disk I/O metrics and return as JSON string.
+    
+    Args:
+        duration_hours: Duration in hours to collect data for (default: 1 hour)
+        step: Query resolution step (default: '1m')
+    
+    Returns:
+        JSON string containing disk I/O metrics data
+    """
+    collector = DiskIOCollector()
+    metrics_data = collector.collect_disk_metrics(duration_hours, step)
+    return json.dumps(metrics_data, indent=2)

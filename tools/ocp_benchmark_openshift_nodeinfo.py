@@ -1,262 +1,318 @@
-#!/usr/bin/env python3
-"""OpenShift Node Information Module"""
-
+"""OpenShift node information retrieval."""
 import json
 import logging
+import subprocess
 from typing import Dict, Any, List, Optional
-from datetime import datetime
 from kubernetes import client
-from ocauth.ocp_benchmark_auth import auth
+from kubernetes.client.rest import ApiException
+from ocauth.ocp_benchmark_auth import ocp_auth
+
 
 logger = logging.getLogger(__name__)
 
+
 class NodeInfoCollector:
-    """Collect OpenShift node information"""
+    """Collects OpenShift node information."""
     
     def __init__(self):
-        self.kube_client = auth.get_kube_client()
+        self.k8s_client = ocp_auth.k8s_client
     
-    def _get_node_role(self, node: Any) -> List[str]:
-        """Determine node role from labels"""
-        labels = node.metadata.labels or {}
-        roles = []
+    def parse_resource_quantity(self, quantity: str) -> float:
+        """Parse Kubernetes resource quantity (e.g., '4Gi', '1000m')."""
+        if not quantity:
+            return 0.0
         
-        # Check for node role labels
-        for label, value in labels.items():
-            if label.startswith('node-role.kubernetes.io/'):
-                role = label.replace('node-role.kubernetes.io/', '')
-                if role:
-                    roles.append(role)
+        # Handle CPU units
+        if quantity.endswith('m'):
+            return float(quantity[:-1]) / 1000.0
+        elif quantity.endswith('n'):
+            return float(quantity[:-1]) / 1_000_000_000.0
         
-        # Fallback to older label format
-        if not roles:
-            if labels.get('kubernetes.io/role') == 'master':
-                roles.append('master')
-            elif labels.get('kubernetes.io/role') == 'node':
-                roles.append('worker')
+        # Handle memory units
+        elif quantity.endswith('Ki'):
+            return float(quantity[:-2]) * 1024
+        elif quantity.endswith('Mi'):
+            return float(quantity[:-2]) * 1024 * 1024
+        elif quantity.endswith('Gi'):
+            return float(quantity[:-2]) * 1024 * 1024 * 1024
+        elif quantity.endswith('Ti'):
+            return float(quantity[:-2]) * 1024 * 1024 * 1024 * 1024
         
-        return roles if roles else ['worker']  # Default to worker
+        # Handle plain numbers
+        try:
+            return float(quantity)
+        except ValueError:
+            return 0.0
     
-    def _extract_instance_type(self, node: Any) -> str:
-        """Extract instance type from node labels"""
+    def get_node_role(self, node: Any) -> str:
+        """Determine node role from labels."""
         labels = node.metadata.labels or {}
+        
+        if 'node-role.kubernetes.io/master' in labels or 'node-role.kubernetes.io/control-plane' in labels:
+            return 'master'
+        elif 'node-role.kubernetes.io/infra' in labels:
+            return 'infra'
+        elif 'node-role.kubernetes.io/worker' in labels:
+            return 'worker'
+        else:
+            # Default to worker if no specific role found
+            return 'worker'
+    
+    def get_instance_type(self, node: Any) -> Optional[str]:
+        """Get instance type from node labels or annotations."""
+        labels = node.metadata.labels or {}
+        annotations = node.metadata.annotations or {}
         
         # Common cloud provider instance type labels
         instance_type_labels = [
             'node.kubernetes.io/instance-type',
             'beta.kubernetes.io/instance-type',
-            'kubernetes.io/instance-type',
-            'failure-domain.beta.kubernetes.io/instance-type'
+            'topology.kubernetes.io/instance-type'
         ]
         
         for label in instance_type_labels:
             if label in labels:
                 return labels[label]
         
+        # Try annotations
+        if 'machine.openshift.io/instance-type' in annotations:
+            return annotations['machine.openshift.io/instance-type']
+        
         return 'unknown'
     
-    def _extract_node_resources(self, node: Any) -> Dict[str, Any]:
-        """Extract CPU and memory resources from node"""
-        allocatable = node.status.allocatable or {}
-        capacity = node.status.capacity or {}
+    def get_nodes_info_api(self) -> List[Dict[str, Any]]:
+        """Get node information using Kubernetes API."""
+        nodes_info = []
         
-        def parse_memory(memory_str: str) -> int:
-            """Parse memory string to bytes"""
-            if not memory_str:
-                return 0
-            
-            # Handle Ki, Mi, Gi suffixes
-            memory_str = memory_str.replace('i', '')  # Remove 'i' from Ki, Mi, Gi
-            
-            multipliers = {
-                'K': 1024,
-                'M': 1024 * 1024,
-                'G': 1024 * 1024 * 1024,
-                'T': 1024 * 1024 * 1024 * 1024
-            }
-            
-            for suffix, multiplier in multipliers.items():
-                if memory_str.endswith(suffix):
-                    value = float(memory_str[:-1])
-                    return int(value * multiplier)
-            
-            # If no suffix, assume bytes
-            try:
-                return int(memory_str)
-            except ValueError:
-                return 0
-        
-        def parse_cpu(cpu_str: str) -> float:
-            """Parse CPU string to cores"""
-            if not cpu_str:
-                return 0.0
-            
-            if cpu_str.endswith('m'):
-                # Millicores
-                return float(cpu_str[:-1]) / 1000
-            else:
-                return float(cpu_str)
-        
-        return {
-            'cpu': {
-                'allocatable_cores': parse_cpu(allocatable.get('cpu', '0')),
-                'capacity_cores': parse_cpu(capacity.get('cpu', '0'))
-            },
-            'memory': {
-                'allocatable_bytes': parse_memory(allocatable.get('memory', '0')),
-                'capacity_bytes': parse_memory(capacity.get('memory', '0')),
-                'allocatable_gb': parse_memory(allocatable.get('memory', '0')) / (1024**3),
-                'capacity_gb': parse_memory(capacity.get('memory', '0')) / (1024**3)
-            },
-            'storage': {
-                'ephemeral_storage': allocatable.get('ephemeral-storage', '0')
-            },
-            'pods': {
-                'allocatable': int(allocatable.get('pods', '0')),
-                'capacity': int(capacity.get('pods', '0'))
-            }
-        }
-    
-    def _get_node_conditions(self, node: Any) -> Dict[str, Any]:
-        """Get node conditions"""
-        conditions = {}
-        
-        for condition in node.status.conditions or []:
-            conditions[condition.type] = {
-                'status': condition.status,
-                'reason': condition.reason,
-                'message': condition.message,
-                'last_transition_time': condition.last_transition_time.isoformat() if condition.last_transition_time else None
-            }
-        
-        return conditions
-    
-    async def get_all_nodes_info(self) -> Dict[str, Any]:
-        """Get information for all nodes"""
         try:
-            v1 = client.CoreV1Api(self.kube_client)
+            v1 = client.CoreV1Api(self.k8s_client)
             nodes = v1.list_node()
             
-            node_info = {
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'total_nodes': len(nodes.items),
-                'summary': {
-                    'master': {'count': 0, 'total_cpu': 0, 'total_memory_gb': 0},
-                    'worker': {'count': 0, 'total_cpu': 0, 'total_memory_gb': 0},
-                    'infra': {'count': 0, 'total_cpu': 0, 'total_memory_gb': 0}
-                },
-                'nodes': []
-            }
-            
             for node in nodes.items:
-                roles = self._get_node_role(node)
-                instance_type = self._extract_instance_type(node)
-                resources = self._extract_node_resources(node)
-                conditions = self._get_node_conditions(node)
+                # Parse capacity
+                capacity = node.status.capacity or {}
+                cpu_cores = self.parse_resource_quantity(capacity.get('cpu', '0'))
+                memory_bytes = self.parse_resource_quantity(capacity.get('memory', '0'))
                 
-                node_data = {
+                # Parse allocatable
+                allocatable = node.status.allocatable or {}
+                allocatable_cpu = self.parse_resource_quantity(allocatable.get('cpu', '0'))
+                allocatable_memory = self.parse_resource_quantity(allocatable.get('memory', '0'))
+                
+                # Get node conditions
+                conditions = {}
+                for condition in node.status.conditions or []:
+                    conditions[condition.type] = condition.status == 'True'
+                
+                # Get addresses
+                addresses = {}
+                for addr in node.status.addresses or []:
+                    addresses[addr.type] = addr.address
+                
+                node_info = {
                     'name': node.metadata.name,
-                    'roles': roles,
-                    'instance_type': instance_type,
-                    'resources': resources,
-                    'conditions': conditions,
-                    'ready': conditions.get('Ready', {}).get('status') == 'True',
-                    'created': node.metadata.creation_timestamp.isoformat() if node.metadata.creation_timestamp else None,
+                    'role': self.get_node_role(node),
+                    'instance_type': self.get_instance_type(node),
+                    'capacity': {
+                        'cpu_cores': round(cpu_cores, 6),
+                        'memory_bytes': memory_bytes,
+                        'memory_gb': round(memory_bytes / (1024 ** 3), 6) if memory_bytes > 0 else 0
+                    },
+                    'allocatable': {
+                        'cpu_cores': round(allocatable_cpu, 6),
+                        'memory_bytes': allocatable_memory,
+                        'memory_gb': round(allocatable_memory / (1024 ** 3), 6) if allocatable_memory > 0 else 0
+                    },
+                    'status': {
+                        'ready': conditions.get('Ready', False),
+                        'schedulable': not (node.spec.unschedulable or False),
+                        'conditions': conditions
+                    },
+                    'addresses': addresses,
                     'labels': node.metadata.labels or {},
-                    'taints': []
+                    'annotations': dict(list((node.metadata.annotations or {}).items())[:5]),  # First 5 annotations
+                    'kernel_version': node.status.node_info.kernel_version if node.status.node_info else 'unknown',
+                    'os_image': node.status.node_info.os_image if node.status.node_info else 'unknown',
+                    'kubelet_version': node.status.node_info.kubelet_version if node.status.node_info else 'unknown'
                 }
                 
-                # Extract taints
-                if node.spec.taints:
-                    for taint in node.spec.taints:
-                        node_data['taints'].append({
-                            'key': taint.key,
-                            'value': taint.value,
-                            'effect': taint.effect
-                        })
-                
-                node_info['nodes'].append(node_data)
-                
-                # Update summary based on primary role
-                primary_role = 'worker'  # Default
-                if 'master' in roles or 'control-plane' in roles:
-                    primary_role = 'master'
-                elif 'infra' in roles:
-                    primary_role = 'infra'
-                
-                node_info['summary'][primary_role]['count'] += 1
-                node_info['summary'][primary_role]['total_cpu'] += resources['cpu']['capacity_cores']
-                node_info['summary'][primary_role]['total_memory_gb'] += resources['memory']['capacity_gb']
-            
-            return node_info
-            
+                nodes_info.append(node_info)
+        
         except Exception as e:
-            logger.error(f"Error getting nodes info: {e}")
-            return {
-                'error': str(e),
-                'timestamp': datetime.utcnow().isoformat() + 'Z'
-            }
+            logger.error(f"Failed to get nodes info with API: {e}")
+            raise
+        
+        return nodes_info
     
-    async def get_nodes_by_role(self, role: str) -> List[Dict[str, Any]]:
-        """Get nodes filtered by role"""
-        all_nodes = await self.get_all_nodes_info()
+    def get_nodes_info_oc(self) -> Optional[List[Dict[str, Any]]]:
+        """Get node information using oc command."""
+        try:
+            result = subprocess.run([
+                'oc', 'get', 'nodes', '-o', 'json'
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                nodes_data = json.loads(result.stdout)
+                nodes_info = []
+                
+                for node in nodes_data.get('items', []):
+                    # Parse capacity
+                    capacity = node.get('status', {}).get('capacity', {})
+                    cpu_cores = self.parse_resource_quantity(capacity.get('cpu', '0'))
+                    memory_bytes = self.parse_resource_quantity(capacity.get('memory', '0'))
+                    
+                    # Parse allocatable
+                    allocatable = node.get('status', {}).get('allocatable', {})
+                    allocatable_cpu = self.parse_resource_quantity(allocatable.get('cpu', '0'))
+                    allocatable_memory = self.parse_resource_quantity(allocatable.get('memory', '0'))
+                    
+                    # Get node conditions
+                    conditions = {}
+                    for condition in node.get('status', {}).get('conditions', []):
+                        conditions[condition['type']] = condition['status'] == 'True'
+                    
+                    # Get addresses
+                    addresses = {}
+                    for addr in node.get('status', {}).get('addresses', []):
+                        addresses[addr['type']] = addr['address']
+                    
+                    # Determine role from labels
+                    labels = node.get('metadata', {}).get('labels', {})
+                    role = 'worker'  # default
+                    if 'node-role.kubernetes.io/master' in labels or 'node-role.kubernetes.io/control-plane' in labels:
+                        role = 'master'
+                    elif 'node-role.kubernetes.io/infra' in labels:
+                        role = 'infra'
+                    elif 'node-role.kubernetes.io/worker' in labels:
+                        role = 'worker'
+                    
+                    # Get instance type
+                    instance_type = 'unknown'
+                    instance_type_labels = [
+                        'node.kubernetes.io/instance-type',
+                        'beta.kubernetes.io/instance-type',
+                        'topology.kubernetes.io/instance-type'
+                    ]
+                    for label in instance_type_labels:
+                        if label in labels:
+                            instance_type = labels[label]
+                            break
+                    
+                    node_info = {
+                        'name': node.get('metadata', {}).get('name'),
+                        'role': role,
+                        'instance_type': instance_type,
+                        'capacity': {
+                            'cpu_cores': round(cpu_cores, 6),
+                            'memory_bytes': memory_bytes,
+                            'memory_gb': round(memory_bytes / (1024 ** 3), 6) if memory_bytes > 0 else 0
+                        },
+                        'allocatable': {
+                            'cpu_cores': round(allocatable_cpu, 6),
+                            'memory_bytes': allocatable_memory,
+                            'memory_gb': round(allocatable_memory / (1024 ** 3), 6) if allocatable_memory > 0 else 0
+                        },
+                        'status': {
+                            'ready': conditions.get('Ready', False),
+                            'schedulable': not node.get('spec', {}).get('unschedulable', False),
+                            'conditions': conditions
+                        },
+                        'addresses': addresses,
+                        'labels': labels,
+                        'annotations': dict(list((node.get('metadata', {}).get('annotations', {})).items())[:5]),
+                        'kernel_version': node.get('status', {}).get('nodeInfo', {}).get('kernelVersion', 'unknown'),
+                        'os_image': node.get('status', {}).get('nodeInfo', {}).get('osImage', 'unknown'),
+                        'kubelet_version': node.get('status', {}).get('nodeInfo', {}).get('kubeletVersion', 'unknown')
+                    }
+                    
+                    nodes_info.append(node_info)
+                
+                return nodes_info
         
-        if 'error' in all_nodes:
-            return []
+        except Exception as e:
+            logger.warning(f"Failed to get nodes info with oc: {e}")
         
-        filtered_nodes = []
-        for node in all_nodes['nodes']:
-            if role in node['roles']:
-                filtered_nodes.append(node)
-        
-        return filtered_nodes
+        return None
     
-    async def get_node_summary(self) -> Dict[str, Any]:
-        """Get summarized node information"""
-        all_nodes = await self.get_all_nodes_info()
-        
-        if 'error' in all_nodes:
-            return all_nodes
-        
-        summary = {
-            'timestamp': all_nodes['timestamp'],
-            'total_nodes': all_nodes['total_nodes'],
-            'roles_summary': all_nodes['summary'],
-            'instance_types': {},
-            'ready_nodes': 0,
-            'not_ready_nodes': 0
+    def group_nodes_by_role(self, nodes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Group nodes by role and calculate statistics."""
+        grouped = {
+            'master': [],
+            'worker': [],
+            'infra': []
         }
         
-        # Count instance types and ready status
-        for node in all_nodes['nodes']:
-            instance_type = node['instance_type']
-            if instance_type not in summary['instance_types']:
-                summary['instance_types'][instance_type] = {
-                    'count': 0,
-                    'total_cpu': 0,
-                    'total_memory_gb': 0
-                }
-            
-            summary['instance_types'][instance_type]['count'] += 1
-            summary['instance_types'][instance_type]['total_cpu'] += node['resources']['cpu']['capacity_cores']
-            summary['instance_types'][instance_type]['total_memory_gb'] += node['resources']['memory']['capacity_gb']
-            
-            if node['ready']:
-                summary['ready_nodes'] += 1
-            else:
-                summary['not_ready_nodes'] += 1
+        for node in nodes:
+            role = node['role']
+            if role in grouped:
+                grouped[role].append(node)
         
-        return summary
+        # Calculate statistics for each group
+        result = {}
+        for role, role_nodes in grouped.items():
+            if not role_nodes:
+                continue
+            
+            total_cpu = sum(node['capacity']['cpu_cores'] for node in role_nodes)
+            total_memory_gb = sum(node['capacity']['memory_gb'] for node in role_nodes)
+            ready_count = sum(1 for node in role_nodes if node['status']['ready'])
+            
+            result[role] = {
+                'count': len(role_nodes),
+                'ready_count': ready_count,
+                'total_cpu_cores': round(total_cpu, 6),
+                'total_memory_gb': round(total_memory_gb, 6),
+                'average_cpu_cores': round(total_cpu / len(role_nodes), 6) if role_nodes else 0,
+                'average_memory_gb': round(total_memory_gb / len(role_nodes), 6) if role_nodes else 0,
+                'instance_types': list(set(node['instance_type'] for node in role_nodes)),
+                'nodes': role_nodes
+            }
+        
+        return result
+    
+    def collect_nodes_info(self) -> Dict[str, Any]:
+        """Collect complete node information."""
+        # Try API first, then oc command
+        nodes = self.get_nodes_info_api()
+        if not nodes:
+            nodes = self.get_nodes_info_oc()
+        
+        if not nodes:
+            raise RuntimeError("Could not retrieve node information")
+        
+        grouped_nodes = self.group_nodes_by_role(nodes)
+        
+        # Calculate cluster totals
+        total_nodes = sum(group['count'] for group in grouped_nodes.values())
+        total_cpu = sum(group['total_cpu_cores'] for group in grouped_nodes.values())
+        total_memory = sum(group['total_memory_gb'] for group in grouped_nodes.values())
+        total_ready = sum(group['ready_count'] for group in grouped_nodes.values())
+        
+        return {
+            'timestamp': None,  # Will be set by caller
+            'cluster_summary': {
+                'total_nodes': total_nodes,
+                'ready_nodes': total_ready,
+                'total_cpu_cores': round(total_cpu, 6),
+                'total_memory_gb': round(total_memory, 6),
+                'node_roles_distribution': {
+                    role: group['count'] for role, group in grouped_nodes.items()
+                }
+            },
+            'nodes_by_role': grouped_nodes,
+            'collection_method': 'api' if nodes else 'oc_command'
+        }
 
-# Global node info collector instance
-node_info_collector = NodeInfoCollector()
-
-async def get_nodes_info_json() -> str:
-    """Get nodes information as JSON string"""
-    info = await node_info_collector.get_all_nodes_info()
+def get_nodes_info() -> str:
+    """Get nodes information and return as JSON string."""
+    collector = NodeInfoCollector()
+    info = collector.collect_nodes_info()
+    
+    # Add timestamp
+    from datetime import datetime
+    info['timestamp'] = datetime.utcnow().isoformat() + 'Z'
+    
     return json.dumps(info, indent=2)
 
-async def get_nodes_summary_json() -> str:
-    """Get nodes summary as JSON string"""
-    summary = await node_info_collector.get_node_summary()
-    return json.dumps(summary, indent=2)
+# Global cluster info collector instance
+node_info_collector = NodeInfoCollector()

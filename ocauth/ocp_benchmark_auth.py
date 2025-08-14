@@ -1,81 +1,84 @@
-#!/usr/bin/env python3
-"""OpenShift Authentication and Prometheus Connection Module"""
-
+"""OpenShift authentication and Prometheus connection management."""
 import os
 import subprocess
 import logging
-import asyncio
-from typing import Optional, Dict, Any, Tuple
-import kubernetes
-from kubernetes import client, config
 import requests
-import json
+from typing import Optional, Tuple
+from urllib.parse import urljoin
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
+
+#Will fix warning instead of just disable it
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
 
-class OpenShiftAuth:
-    """OpenShift authentication and Prometheus connection management"""
+
+class OCPAuth:
+    """Handles OpenShift authentication and Prometheus URL discovery."""
     
     def __init__(self):
-        self.kube_client = None
+        self.kubeconfig_path = os.getenv('KUBECONFIG')
+        self.k8s_client = None
         self.prometheus_url = None
         self.prometheus_token = None
-        self._initialize_kube_client()
+        self._setup_kubernetes_client()
     
-    def _initialize_kube_client(self) -> None:
-        """Initialize Kubernetes client using KUBECONFIG"""
+    def _setup_kubernetes_client(self):
+        """Initialize Kubernetes client using KUBECONFIG."""
         try:
-            # Load kubeconfig from environment or default location
-            if 'KUBECONFIG' in os.environ:
-                config.load_kube_config(config_file=os.environ['KUBECONFIG'])
+            if self.kubeconfig_path and os.path.exists(self.kubeconfig_path):
+                config.load_kube_config(config_file=self.kubeconfig_path)
             else:
-                config.load_kube_config()
+                # Try in-cluster config if no kubeconfig
+                config.load_incluster_config()
             
-            self.kube_client = client.ApiClient()
-            logger.info("Successfully initialized Kubernetes client")
-            
+            self.k8s_client = client.ApiClient()
+            logger.info("Kubernetes client initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize Kubernetes client: {e}")
             raise
-    
-    async def get_prometheus_url(self) -> Optional[str]:
+
+    def get_prometheus_url(self) -> Optional[str]:
         """Automatically discover Prometheus URL from OpenShift monitoring"""
         try:
-            v1 = client.CoreV1Api(self.kube_client)
+            custom_api = client.CustomObjectsApi(self.k8s_client)
+            routes = custom_api.list_namespaced_custom_object(
+                group="route.openshift.io",
+                version="v1",
+                namespace="openshift-monitoring",
+                plural="routes"
+            )
             
-            # Try to find prometheus service in openshift-monitoring namespace
-            services = v1.list_namespaced_service(namespace="openshift-monitoring")
-            
-            for service in services.items:
-                if "prometheus" in service.metadata.name.lower():
-                    if service.spec.ports:
-                        port = service.spec.ports[0].port
-                        # Use internal cluster DNS name
-                        prometheus_url = f"https://{service.metadata.name}.openshift-monitoring.svc.cluster.local:{port}"
-                        self.prometheus_url = prometheus_url
-                        logger.info(f"Found Prometheus URL: {prometheus_url}")
-                        return prometheus_url
-            
-            # Fallback: try to find route
+            for route in routes.get('items', []):
+                if "prometheus" in route['metadata']['name'].lower():
+                    host = route['spec'].get('host')
+                    if host:
+                        self.prometheus_url = f"https://{host}"
+                        logger.info(f"Found Prometheus route: {self.prometheus_url}")
+                        return self.prometheus_url
+                                    
+            # Fallback: try to find service
             try:
-                custom_api = client.CustomObjectsApi(self.kube_client)
-                routes = custom_api.list_namespaced_custom_object(
-                    group="route.openshift.io",
-                    version="v1",
-                    namespace="openshift-monitoring",
-                    plural="routes"
-                )
+                v1 = client.CoreV1Api(self.k8s_client)
                 
-                for route in routes.get('items', []):
-                    if "prometheus" in route['metadata']['name'].lower():
-                        host = route['spec'].get('host')
-                        if host:
-                            self.prometheus_url = f"https://{host}"
-                            logger.info(f"Found Prometheus route: {self.prometheus_url}")
-                            return self.prometheus_url
+                # Try to find prometheus service in openshift-monitoring namespace
+                services = v1.list_namespaced_service(namespace="openshift-monitoring")
+                
+                for service in services.items:
+                    if "prometheus" in service.metadata.name.lower():
+                        if service.spec.ports:
+                            port = service.spec.ports[0].port
+                            # Use internal cluster DNS name
+                            prometheus_url = f"https://{service.metadata.name}.openshift-monitoring.svc.cluster.local:{port}"
+                            self.prometheus_url = prometheus_url
+                            logger.info(f"Found Prometheus URL: {prometheus_url}")
+                            return prometheus_url
+                
                             
-            except Exception as route_error:
-                logger.warning(f"Could not fetch routes: {route_error}")
+            except Exception as service_error:
+                logger.warning(f"Could not fetch routes: {service_error}")
             
             logger.error("Could not discover Prometheus URL")
             return None
@@ -84,127 +87,86 @@ class OpenShiftAuth:
             logger.error(f"Error discovering Prometheus URL: {e}")
             return None
     
-    async def get_prometheus_token(self) -> Optional[str]:
-        """Get service account token for Prometheus access"""
+    def get_prometheus_token(self) -> Optional[str]:
+        """Get service account token for Prometheus access."""
+        if self.prometheus_token:
+            return self.prometheus_token
+        
         try:
-            # First try to create a token using oc command
-            result = await self._run_oc_command([
-                "create", "token", "-n", "openshift-monitoring", "prometheus-k8s"
-            ])
+            # First try: create token using oc command
+            result = subprocess.run([
+                'oc', 'create', 'token', 'prometheus-k8s', '-n', 'openshift-monitoring'
+            ], capture_output=True, text=True, timeout=30)
             
-            if result and result.strip():
-                self.prometheus_token = result.strip()
+            if result.returncode == 0:
+                self.prometheus_token = result.stdout.strip()
                 logger.info("Successfully created Prometheus token using 'oc create token'")
                 return self.prometheus_token
             
-        except Exception as e:
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError) as e:
             logger.warning(f"Failed to create token with 'oc create token': {e}")
         
         try:
-            # Fallback: try with sa new-token
-            result = await self._run_oc_command([
-                "sa", "new-token", "-n", "openshift-monitoring", "prometheus-k8s"
-            ])
+            # Fallback: try new-token (deprecated but might work)
+            result = subprocess.run([
+                'oc', 'sa', 'new-token', 'prometheus-k8s', '-n', 'openshift-monitoring'
+            ], capture_output=True, text=True, timeout=30)
             
-            if result and result.strip():
-                self.prometheus_token = result.strip()
+            if result.returncode == 0:
+                self.prometheus_token = result.stdout.strip()
                 logger.info("Successfully created Prometheus token using 'oc sa new-token'")
                 return self.prometheus_token
-                
-        except Exception as e:
+            
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError) as e:
             logger.warning(f"Failed to create token with 'oc sa new-token': {e}")
         
-        # Last resort: try to get token from secret
+        # Try to get token from service account secret
         try:
-            token = await self._get_token_from_secret()
-            if token:
-                self.prometheus_token = token
-                logger.info("Successfully retrieved token from service account secret")
-                return token
-        except Exception as e:
-            logger.error(f"Failed to get token from secret: {e}")
-        
-        logger.error("Could not obtain Prometheus token")
-        return None
-    
-    async def _run_oc_command(self, args: list) -> Optional[str]:
-        """Run oc command and return output"""
-        try:
-            cmd = ["oc"] + args
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            v1 = client.CoreV1Api(self.k8s_client)
             
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode == 0:
-                return stdout.decode('utf-8')
-            else:
-                logger.error(f"Command failed: {' '.join(cmd)}, Error: {stderr.decode('utf-8')}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error running oc command: {e}")
-            return None
-    
-    async def _get_token_from_secret(self) -> Optional[str]:
-        """Get token from service account secret"""
-        try:
-            v1 = client.CoreV1Api(self.kube_client)
-            
-            # Get the service account
+            # Get service account
             sa = v1.read_namespaced_service_account(
                 name="prometheus-k8s",
                 namespace="openshift-monitoring"
             )
             
             # Look for token secrets
-            if sa.secrets:
-                for secret_ref in sa.secrets:
-                    secret = v1.read_namespaced_secret(
-                        name=secret_ref.name,
-                        namespace="openshift-monitoring"
-                    )
-                    
-                    if secret.type == "kubernetes.io/service-account-token":
-                        token_data = secret.data.get("token")
-                        if token_data:
-                            import base64
-                            return base64.b64decode(token_data).decode('utf-8')
-            
-            return None
+            for secret_ref in sa.secrets or []:
+                secret = v1.read_namespaced_secret(
+                    name=secret_ref.name,
+                    namespace="openshift-monitoring"
+                )
+                
+                if secret.type == "kubernetes.io/service-account-token":
+                    token_data = secret.data.get('token')
+                    if token_data:
+                        import base64
+                        self.prometheus_token = base64.b64decode(token_data).decode('utf-8')
+                        logger.info("Successfully extracted token from service account secret")
+                        return self.prometheus_token
             
         except Exception as e:
-            logger.error(f"Error getting token from secret: {e}")
-            return None
-    
-    async def initialize_prometheus_connection(self) -> Tuple[Optional[str], Optional[str]]:
-        """Initialize Prometheus connection - returns (url, token)"""
-        url = await self.get_prometheus_url()
-        token = await self.get_prometheus_token()
+            logger.error(f"Failed to get token from service account secret: {e}")
         
-        if url and token:
-            # Test the connection
-            if await self.test_prometheus_connection(url, token):
-                logger.info("Prometheus connection successfully established")
-                return url, token
-            else:
-                logger.error("Prometheus connection test failed")
-        
-        return None, None
+        return None
     
-    async def test_prometheus_connection(self, url: str, token: str) -> bool:
-        """Test Prometheus connection"""
+    def test_prometheus_connection(self) -> bool:
+        """Test connection to Prometheus with the obtained token."""
+        prometheus_url = self.get_prometheus_url()
+        token = self.get_prometheus_token()
+        
+        if not prometheus_url or not token:
+            logger.error("Missing Prometheus URL or token")
+            return False
+        
         try:
             headers = {
                 'Authorization': f'Bearer {token}',
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/x-www-form-urlencoded'
             }
             
-            # Use a simple query to test connection
-            test_url = f"{url}/api/v1/query"
+            # Test with a simple query
+            test_url = urljoin(prometheus_url, '/api/v1/query')
             params = {'query': 'up'}
             
             response = requests.get(
@@ -216,21 +178,39 @@ class OpenShiftAuth:
             )
             
             if response.status_code == 200:
-                data = response.json()
-                if data.get('status') == 'success':
-                    logger.info("Prometheus connection test successful")
-                    return True
-            
-            logger.error(f"Prometheus connection test failed: {response.status_code} - {response.text}")
-            return False
-            
+                logger.info("Prometheus connection test successful")
+                return True
+            else:
+                logger.error(f"Prometheus connection test failed: {response.status_code}")
+                return False
+                
         except Exception as e:
-            logger.error(f"Error testing Prometheus connection: {e}")
+            logger.error(f"Prometheus connection test failed: {e}")
             return False
     
-    def get_kube_client(self) -> Optional[client.ApiClient]:
-        """Get Kubernetes client"""
-        return self.kube_client
+    def get_auth_headers(self) -> dict:
+        """Get authentication headers for Prometheus requests."""
+        token = self.get_prometheus_token()
+        if not token:
+            raise ValueError("No Prometheus token available")
+        
+        return {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json'
+        }
+    
+    def setup_connection(self) -> Tuple[Optional[str], Optional[dict]]:
+        """Setup complete Prometheus connection and return URL and headers."""
+        prometheus_url = self.get_prometheus_url()
+        
+        if not prometheus_url:
+            raise ValueError("Could not discover Prometheus URL")
+        
+        if not self.test_prometheus_connection():
+            raise ValueError("Could not establish connection to Prometheus")
+        
+        return prometheus_url, self.get_auth_headers()
 
-# Global authentication instance
-auth = OpenShiftAuth()
+
+# Global auth instance
+ocp_auth = OCPAuth()

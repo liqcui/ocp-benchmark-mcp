@@ -1,14 +1,16 @@
 #!/bin/bash
 
 # OpenShift Benchmark MCP Server Startup Script
-# This script starts all components of the OpenShift Benchmark MCP system
+# This script starts the OpenShift Benchmark MCP server and related services
 
 set -e
 
 # Configuration
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_DIR="${SCRIPT_DIR}/logs"
-PID_DIR="${SCRIPT_DIR}/pids"
+PROJECT_NAME="ocp-benchmark-mcp"
+MCP_SERVER_PORT="${MCP_SERVER_PORT:-8000}"
+MCP_CLIENT_PORT="${MCP_CLIENT_PORT:-8001}"
+LOG_LEVEL="${LOG_LEVEL:-INFO}"
+TIMEZONE="${TZ:-UTC}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -19,480 +21,498 @@ NC='\033[0m' # No Color
 
 # Logging function
 log() {
-    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] $1${NC}"
+    echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S UTC')] $1${NC}"
 }
 
 error() {
-    echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $1${NC}" >&2
+    echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S UTC')] ERROR: $1${NC}" >&2
 }
 
 warn() {
-    echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] WARNING: $1${NC}"
+    echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S UTC')] WARNING: $1${NC}"
 }
 
-info() {
-    echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')] INFO: $1${NC}"
+success() {
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S UTC')] SUCCESS: $1${NC}"
 }
 
-# Create necessary directories
-create_directories() {
-    log "Creating necessary directories..."
-    mkdir -p "${LOG_DIR}"
-    mkdir -p "${PID_DIR}"
-    mkdir -p "${SCRIPT_DIR}/exports"
-    mkdir -p "${SCRIPT_DIR}/html"
-}
-
-# Check prerequisites
+# Function to check prerequisites
 check_prerequisites() {
     log "Checking prerequisites..."
     
-    # Check if Python is available
-    if ! command -v python3 &> /dev/null; then
+    # Check Python 3.8+
+    if ! python3 --version &> /dev/null; then
         error "Python 3 is required but not installed"
         exit 1
     fi
     
-    # Check Python version
-    PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-    if [[ "$(echo "$PYTHON_VERSION < 3.9" | bc -l 2>/dev/null || echo 1)" == "1" ]]; then
-        error "Python 3.9+ is required, found: $PYTHON_VERSION"
+    local python_version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    if [[ $(echo "$python_version < 3.8" | bc -l) -eq 1 ]]; then
+        error "Python 3.8+ is required, found $python_version"
         exit 1
     fi
     
-    # Check if KUBECONFIG is set or kubectl is configured
-    if [[ -z "${KUBECONFIG}" ]] && ! kubectl config current-context &> /dev/null; then
-        error "KUBECONFIG not set and kubectl not configured"
+    # Check KUBECONFIG
+    if [[ -z "$KUBECONFIG" ]]; then
+        error "KUBECONFIG environment variable is not set"
         exit 1
     fi
     
-    # Check if oc command is available
+    if [[ ! -f "$KUBECONFIG" ]]; then
+        error "KUBECONFIG file not found: $KUBECONFIG"
+        exit 1
+    fi
+    
+    # Check oc command
     if ! command -v oc &> /dev/null; then
-        warn "OpenShift CLI (oc) not found. Some features may not work properly."
+        warn "oc command not found, some features may not work"
     fi
     
-    # Check if required packages are installed
-    if ! python3 -c "import fastmcp, fastapi, langchain, kubernetes" &> /dev/null; then
-        error "Required Python packages not installed. Please run: pip install -r requirements.txt"
+    # Check kubectl command as fallback
+    if ! command -v kubectl &> /dev/null && ! command -v oc &> /dev/null; then
+        error "Neither oc nor kubectl command found"
         exit 1
     fi
     
-    log "Prerequisites check completed"
-}
-
-# Set timezone to UTC
-set_timezone() {
-    log "Setting timezone to UTC..."
-    export TZ=UTC
-}
-
-# Test OpenShift connection
-test_openshift_connection() {
-    log "Testing OpenShift connection..."
+    # Set timezone
+    export TZ="$TIMEZONE"
     
+    success "Prerequisites check completed"
+}
+
+# Function to install dependencies
+install_dependencies() {
+    log "Installing Python dependencies..."
+    
+    if [[ -f "pyproject.toml" ]]; then
+        pip3 install -e . --quiet
+    else
+        error "pyproject.toml not found. Please run this script from the project root directory."
+        exit 1
+    fi
+    
+    success "Dependencies installed successfully"
+}
+
+# Function to create necessary directories
+create_directories() {
+    log "Creating necessary directories..."
+    
+    local dirs=("exports" "logs")
+    for dir in "${dirs[@]}"; do
+        if [[ ! -d "$dir" ]]; then
+            mkdir -p "$dir"
+            log "Created directory: $dir"
+        fi
+    done
+    
+    success "Directories created"
+}
+
+# Function to test OpenShift connectivity
+test_connectivity() {
+    log "Testing OpenShift connectivity..."
+    
+    # Test cluster access
     if command -v oc &> /dev/null; then
         if ! oc whoami &> /dev/null; then
-            error "Not logged into OpenShift cluster"
+            error "Cannot connect to OpenShift cluster. Please check your KUBECONFIG and login status."
             exit 1
         fi
-        
-        CLUSTER_VERSION=$(oc version --client=false -o json 2>/dev/null | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('openshiftVersion', 'unknown'))" 2>/dev/null || echo "unknown")
-        log "Connected to OpenShift cluster version: ${CLUSTER_VERSION}"
-    else
-        # Fallback to kubectl
+        local current_project=$(oc project -q 2>/dev/null || echo "default")
+        log "Connected to OpenShift cluster as $(oc whoami) in project $current_project"
+    elif command -v kubectl &> /dev/null; then
         if ! kubectl cluster-info &> /dev/null; then
-            error "Cannot connect to Kubernetes/OpenShift cluster"
+            error "Cannot connect to Kubernetes cluster. Please check your KUBECONFIG."
             exit 1
         fi
         log "Connected to Kubernetes cluster"
     fi
+    
+    # Test Prometheus access (if possible)
+    log "Testing Prometheus connectivity (this may take a moment)..."
+    python3 -c "
+import sys
+sys.path.append('.')
+try:
+    from ocauth.ocp_benchmark_auth import ocp_auth
+    prometheus_url = ocp_auth.get_prometheus_url()
+    if prometheus_url:
+        print(f'Prometheus URL discovered: {prometheus_url}')
+        if ocp_auth.test_prometheus_connection():
+            print('Prometheus connection test: PASSED')
+        else:
+            print('Prometheus connection test: FAILED')
+    else:
+        print('Could not discover Prometheus URL')
+except Exception as e:
+    print(f'Prometheus test failed: {e}')
+"
+    
+    success "Connectivity tests completed"
 }
 
-# Install Python dependencies
-install_dependencies() {
-    if [[ "$1" == "--install-deps" ]]; then
-        log "Installing Python dependencies..."
-        python3 -m pip install --upgrade pip
-        python3 -m pip install -r requirements.txt
-        log "Dependencies installed"
-    fi
-}
-
-# Start MCP Server
+# Function to start MCP server
 start_mcp_server() {
-    log "Starting OpenShift Benchmark MCP Server..."
+    log "Starting MCP Server on port $MCP_SERVER_PORT..."
     
-    cd "${SCRIPT_DIR}"
-    nohup python3 ocp_benchmark_mcp_server.py > "${LOG_DIR}/mcp_server.log" 2>&1 &
-    MCP_PID=$!
-    echo $MCP_PID > "${PID_DIR}/mcp_server.pid"
-    
-    # Wait a bit and check if process is running
-    sleep 3
-    if ! kill -0 $MCP_PID 2>/dev/null; then
-        error "MCP Server failed to start. Check log: ${LOG_DIR}/mcp_server.log"
-        exit 1
+    # Kill any existing process on the port
+    if lsof -Pi :$MCP_SERVER_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
+        warn "Port $MCP_SERVER_PORT is already in use, attempting to kill existing process..."
+        local pid=$(lsof -Pi :$MCP_SERVER_PORT -sTCP:LISTEN -t)
+        kill -TERM $pid 2>/dev/null || true
+        sleep 2
     fi
     
-    log "MCP Server started with PID: $MCP_PID"
-}
-
-# Start MCP API Server
-start_mcp_api() {
-    log "Starting MCP API Server..."
+    # Start the server in background
+    nohup python3 ocp_benchmark_mcp_server.py > logs/mcp_server.log 2>&1 &
+    local server_pid=$!
+    echo $server_pid > logs/mcp_server.pid
     
-    cd "${SCRIPT_DIR}"
-    nohup python3 ocp_benchmark_mcp_api.py > "${LOG_DIR}/mcp_api.log" 2>&1 &
-    API_PID=$!
-    echo $API_PID > "${PID_DIR}/mcp_api.pid"
-    
-    # Wait a bit and check if process is running
+    # Wait a moment for server to start
     sleep 3
-    if ! kill -0 $API_PID 2>/dev/null; then
-        error "MCP API Server failed to start. Check log: ${LOG_DIR}/mcp_api.log"
+    
+    # Check if server is running
+    if kill -0 $server_pid 2>/dev/null; then
+        success "MCP Server started successfully (PID: $server_pid)"
+        log "Server logs: tail -f logs/mcp_server.log"
+        log "Server URL: http://localhost:$MCP_SERVER_PORT"
+    else
+        error "Failed to start MCP Server"
+        cat logs/mcp_server.log
         exit 1
     fi
-    
-    log "MCP API Server started with PID: $API_PID"
 }
 
-# Start MCP Client Chat Interface
+# Function to start MCP client
 start_mcp_client() {
-    log "Starting MCP Client Chat Interface..."
+    if [[ "$1" == "--client-only" ]]; then
+        return 0
+    fi
     
-    cd "${SCRIPT_DIR}"
-    nohup python3 ocp_benchmark_mcp_client_chat.py > "${LOG_DIR}/mcp_client.log" 2>&1 &
-    CLIENT_PID=$!
-    echo $CLIENT_PID > "${PID_DIR}/mcp_client.pid"
+    log "Starting MCP Client on port $MCP_CLIENT_PORT..."
     
-    # Wait a bit and check if process is running
+    # Kill any existing process on the port
+    if lsof -Pi :$MCP_CLIENT_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
+        warn "Port $MCP_CLIENT_PORT is already in use, attempting to kill existing process..."
+        local pid=$(lsof -Pi :$MCP_CLIENT_PORT -sTCP:LISTEN -t)
+        kill -TERM $pid 2>/dev/null || true
+        sleep 2
+    fi
+    
+    # Start the client in background
+    nohup python3 ocp_benchmark_mcp_client_chat.py > logs/mcp_client.log 2>&1 &
+    local client_pid=$!
+    echo $client_pid > logs/mcp_client.pid
+    
+    # Wait a moment for client to start
     sleep 3
-    if ! kill -0 $CLIENT_PID 2>/dev/null; then
-        error "MCP Client failed to start. Check log: ${LOG_DIR}/mcp_client.log"
+    
+    # Check if client is running
+    if kill -0 $client_pid 2>/dev/null; then
+        success "MCP Client started successfully (PID: $client_pid)"
+        log "Client logs: tail -f logs/mcp_client.log"
+        log "Client URL: http://localhost:$MCP_CLIENT_PORT"
+    else
+        error "Failed to start MCP Client"
+        cat logs/mcp_client.log
         exit 1
     fi
-    
-    log "MCP Client Chat Interface started with PID: $CLIENT_PID"
 }
 
-# Wait for services to be ready
-wait_for_services() {
-    log "Waiting for services to be ready..."
-    
-    # Wait for MCP Server
-    for i in {1..30}; do
-        if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
-            log "MCP Server is ready"
-            break
-        fi
-        if [[ $i -eq 30 ]]; then
-            error "MCP Server failed to become ready"
-            exit 1
-        fi
-        sleep 2
-    done
-    
-    # Wait for MCP API Server
-    for i in {1..30}; do
-        if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-            log "MCP API Server is ready"
-            break
-        fi
-        if [[ $i -eq 30 ]]; then
-            error "MCP API Server failed to become ready"
-            exit 1
-        fi
-        sleep 2
-    done
-    
-    # Wait for MCP Client
-    for i in {1..30}; do
-        if curl -sf http://localhost:8081/health > /dev/null 2>&1; then
-            log "MCP Client Chat Interface is ready"
-            break
-        fi
-        if [[ $i -eq 30 ]]; then
-            error "MCP Client Chat Interface failed to become ready"
-            exit 1
-        fi
-        sleep 2
-    done
-}
-
-# Stop all services
+# Function to stop services
 stop_services() {
-    log "Stopping all services..."
-    
-    # Stop MCP Client
-    if [[ -f "${PID_DIR}/mcp_client.pid" ]]; then
-        CLIENT_PID=$(cat "${PID_DIR}/mcp_client.pid")
-        if kill -0 $CLIENT_PID 2>/dev/null; then
-            kill $CLIENT_PID
-            log "MCP Client stopped"
-        fi
-        rm -f "${PID_DIR}/mcp_client.pid"
-    fi
-    
-    # Stop MCP API Server
-    if [[ -f "${PID_DIR}/mcp_api.pid" ]]; then
-        API_PID=$(cat "${PID_DIR}/mcp_api.pid")
-        if kill -0 $API_PID 2>/dev/null; then
-            kill $API_PID
-            log "MCP API Server stopped"
-        fi
-        rm -f "${PID_DIR}/mcp_api.pid"
-    fi
+    log "Stopping services..."
     
     # Stop MCP Server
-    if [[ -f "${PID_DIR}/mcp_server.pid" ]]; then
-        MCP_PID=$(cat "${PID_DIR}/mcp_server.pid")
-        if kill -0 $MCP_PID 2>/dev/null; then
-            kill $MCP_PID
-            log "MCP Server stopped"
+    if [[ -f logs/mcp_server.pid ]]; then
+        local server_pid=$(cat logs/mcp_server.pid)
+        if kill -0 $server_pid 2>/dev/null; then
+            kill -TERM $server_pid
+            log "Stopped MCP Server (PID: $server_pid)"
         fi
-        rm -f "${PID_DIR}/mcp_server.pid"
+        rm -f logs/mcp_server.pid
     fi
+    
+    # Stop MCP Client
+    if [[ -f logs/mcp_client.pid ]]; then
+        local client_pid=$(cat logs/mcp_client.pid)
+        if kill -0 $client_pid 2>/dev/null; then
+            kill -TERM $client_pid
+            log "Stopped MCP Client (PID: $client_pid)"
+        fi
+        rm -f logs/mcp_client.pid
+    fi
+    
+    success "Services stopped"
 }
 
-# Show service status
+# Function to show status
 show_status() {
     log "Service Status:"
-    echo
     
     # Check MCP Server
-    if [[ -f "${PID_DIR}/mcp_server.pid" ]]; then
-        MCP_PID=$(cat "${PID_DIR}/mcp_server.pid")
-        if kill -0 $MCP_PID 2>/dev/null; then
-            echo -e "  ${GREEN}✓${NC} MCP Server (PID: $MCP_PID) - http://localhost:8000"
+    if [[ -f logs/mcp_server.pid ]]; then
+        local server_pid=$(cat logs/mcp_server.pid)
+        if kill -0 $server_pid 2>/dev/null; then
+            success "MCP Server: Running (PID: $server_pid, Port: $MCP_SERVER_PORT)"
         else
-            echo -e "  ${RED}✗${NC} MCP Server (not running)"
+            error "MCP Server: Not running (stale PID file)"
         fi
     else
-        echo -e "  ${RED}✗${NC} MCP Server (not started)"
-    fi
-    
-    # Check MCP API Server
-    if [[ -f "${PID_DIR}/mcp_api.pid" ]]; then
-        API_PID=$(cat "${PID_DIR}/mcp_api.pid")
-        if kill -0 $API_PID 2>/dev/null; then
-            echo -e "  ${GREEN}✓${NC} MCP API Server (PID: $API_PID) - http://localhost:8080"
-        else
-            echo -e "  ${RED}✗${NC} MCP API Server (not running)"
-        fi
-    else
-        echo -e "  ${RED}✗${NC} MCP API Server (not started)"
+        warn "MCP Server: Not running"
     fi
     
     # Check MCP Client
-    if [[ -f "${PID_DIR}/mcp_client.pid" ]]; then
-        CLIENT_PID=$(cat "${PID_DIR}/mcp_client.pid")
-        if kill -0 $CLIENT_PID 2>/dev/null; then
-            echo -e "  ${GREEN}✓${NC} MCP Client Chat (PID: $CLIENT_PID) - http://localhost:8081"
+    if [[ -f logs/mcp_client.pid ]]; then
+        local client_pid=$(cat logs/mcp_client.pid)
+        if kill -0 $client_pid 2>/dev/null; then
+            success "MCP Client: Running (PID: $client_pid, Port: $MCP_CLIENT_PORT)"
         else
-            echo -e "  ${RED}✗${NC} MCP Client Chat (not running)"
+            error "MCP Client: Not running (stale PID file)"
         fi
     else
-        echo -e "  ${RED}✗${NC} MCP Client Chat (not started)"
+        warn "MCP Client: Not running"
     fi
     
-    echo
+    # Show resource usage if processes are running
+    if [[ -f logs/mcp_server.pid ]] || [[ -f logs/mcp_client.pid ]]; then
+        log "Resource Usage:"
+        ps aux | head -1
+        ps aux | grep -E "(ocp_benchmark_mcp|python3.*ocp)" | grep -v grep || true
+    fi
 }
 
-# Show logs
-show_logs() {
-    local service="$1"
+# Function to run performance test
+run_performance_test() {
+    log "Running performance test..."
     
-    case "$service" in
-        "server"|"mcp")
-            if [[ -f "${LOG_DIR}/mcp_server.log" ]]; then
-                tail -f "${LOG_DIR}/mcp_server.log"
-            else
-                error "MCP Server log not found"
-            fi
-            ;;
-        "api")
-            if [[ -f "${LOG_DIR}/mcp_api.log" ]]; then
-                tail -f "${LOG_DIR}/mcp_api.log"
-            else
-                error "MCP API log not found"
-            fi
-            ;;
-        "client"|"chat")
-            if [[ -f "${LOG_DIR}/mcp_client.log" ]]; then
-                tail -f "${LOG_DIR}/mcp_client.log"
-            else
-                error "MCP Client log not found"
-            fi
-            ;;
-        *)
-            error "Unknown service: $service"
-            echo "Available services: server, api, client"
-            ;;
-    esac
-}
-
-# Run AI agent analysis
-run_analysis() {
-    local duration="${1:-1}"
-    
-    log "Running AI agent performance analysis for ${duration} hours..."
-    cd "${SCRIPT_DIR}"
-    python3 ocp_benchmark_mcp_agent.py --duration-hours "$duration"
-}
-
-# Test cluster connection and gather basic info
-test_cluster() {
-    log "Testing cluster connection and gathering basic information..."
-    
-    cd "${SCRIPT_DIR}"
     python3 -c "
+import sys
 import asyncio
-from tools.ocp_benchmark_openshift_clusterinfo import get_cluster_info_json
-from tools.ocp_benchmark_openshift_nodeinfo import get_nodes_summary_json
+import json
+sys.path.append('.')
 
-async def test():
+async def test_tools():
     try:
-        print('\\n=== Cluster Information ===')
-        cluster_info = await get_cluster_info_json()
-        print(cluster_info)
+        # Test cluster info
+        from tools.ocp_benchmark_openshift_clusterinfo import get_cluster_info
+        cluster_info = json.loads(get_cluster_info())
+        print(f'✓ Cluster: {cluster_info.get(\"summary\", {}).get(\"cluster_name\", \"unknown\")}')
         
-        print('\\n=== Node Summary ===')
-        node_info = await get_nodes_summary_json()
-        print(node_info)
+        # Test node info
+        from tools.ocp_benchmark_openshift_nodeinfo import get_nodes_info
+        node_info = json.loads(get_nodes_info())
+        total_nodes = node_info.get('cluster_summary', {}).get('total_nodes', 0)
+        print(f'✓ Nodes: {total_nodes} total nodes')
         
-        print('\\n✓ Cluster connection test completed successfully')
+        # Test nodes usage (short duration)
+        from tools.ocp_benchmark_prometheus_nodes_usage import get_nodes_usage
+        nodes_usage = json.loads(get_nodes_usage(0.1))  # 6 minutes
+        print(f'✓ Nodes Usage: Data collected for {len(nodes_usage.get(\"nodes\", {}))} nodes')
+        
+        print('✓ All tools working correctly')
+        return True
+        
     except Exception as e:
-        print(f'✗ Cluster connection test failed: {e}')
-        
-asyncio.run(test())
+        print(f'✗ Test failed: {e}')
+        return False
+
+# Run the test
+success = asyncio.run(test_tools())
+sys.exit(0 if success else 1)
 "
+    
+    if [[ $? -eq 0 ]]; then
+        success "Performance test completed successfully"
+    else
+        error "Performance test failed"
+        exit 1
+    fi
 }
 
-# Show usage information
-show_usage() {
-    echo "OpenShift Benchmark MCP Server Management Script"
-    echo
-    echo "Usage: $0 [COMMAND] [OPTIONS]"
-    echo
+# Function to show help
+show_help() {
+    echo "Usage: $0 [OPTIONS] [COMMAND]"
+    echo ""
     echo "Commands:"
-    echo "  start [--install-deps]    Start all MCP services"
-    echo "  stop                      Stop all MCP services"
-    echo "  restart [--install-deps]  Restart all MCP services"
-    echo "  status                    Show service status"
-    echo "  logs <service>            Show logs (service: server|api|client)"
-    echo "  test                      Test cluster connection"
-    echo "  analyze [duration]        Run AI agent analysis (default: 1 hour)"
-    echo "  help                      Show this help message"
-    echo
+    echo "  start       Start both MCP server and client (default)"
+    echo "  stop        Stop all services"
+    echo "  restart     Restart all services"
+    echo "  status      Show service status"
+    echo "  test        Run connectivity and performance tests"
+    echo "  server-only Start only the MCP server"
+    echo "  client-only Start only the MCP client"
+    echo "  help        Show this help message"
+    echo ""
     echo "Options:"
-    echo "  --install-deps            Install Python dependencies before starting"
-    echo
+    echo "  --server-port PORT    MCP Server port (default: 8000)"
+    echo "  --client-port PORT    MCP Client port (default: 8001)"
+    echo "  --log-level LEVEL     Log level (default: INFO)"
+    echo "  --skip-deps          Skip dependency installation"
+    echo "  --skip-test          Skip connectivity tests"
+    echo ""
+    echo "Environment Variables:"
+    echo "  KUBECONFIG           Path to kubeconfig file (required)"
+    echo "  OPENAI_API_KEY       OpenAI API key for AI features"
+    echo "  MCP_SERVER_PORT      Override server port"
+    echo "  MCP_CLIENT_PORT      Override client port"
+    echo "  LOG_LEVEL            Override log level"
+    echo "  TZ                   Timezone (default: UTC)"
+    echo ""
     echo "Examples:"
-    echo "  $0 start --install-deps   # Install deps and start services"
-    echo "  $0 logs server           # Show MCP server logs"
-    echo "  $0 analyze 2             # Run 2-hour analysis"
-    echo
-    echo "Service URLs:"
-    echo "  MCP Server:        http://localhost:8000"
-    echo "  MCP API Server:    http://localhost:8080"
-    echo "  Chat Interface:    http://localhost:8081"
+    echo "  $0 start                    # Start both server and client"
+    echo "  $0 server-only             # Start only server"
+    echo "  $0 --server-port 9000 start # Start with custom port"
+    echo "  $0 test                     # Run tests only"
+    echo "  $0 status                   # Check service status"
 }
 
-# Signal handlers for cleanup
+# Signal handlers
 cleanup() {
-    log "Received interrupt signal, stopping services..."
+    log "Received interrupt signal, cleaning up..."
     stop_services
     exit 0
 }
 
-trap cleanup INT TERM
+trap cleanup SIGINT SIGTERM
 
-# Main script logic
+# Main execution
 main() {
-    local command="${1:-help}"
+    local skip_deps=false
+    local skip_test=false
+    local command="start"
     
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --server-port)
+                MCP_SERVER_PORT="$2"
+                shift 2
+                ;;
+            --client-port)
+                MCP_CLIENT_PORT="$2"
+                shift 2
+                ;;
+            --log-level)
+                LOG_LEVEL="$2"
+                shift 2
+                ;;
+            --skip-deps)
+                skip_deps=true
+                shift
+                ;;
+            --skip-test)
+                skip_test=true
+                shift
+                ;;
+            start|stop|restart|status|test|server-only|client-only|help)
+                command="$1"
+                shift
+                ;;
+            -h|--help)
+                command="help"
+                shift
+                ;;
+            *)
+                error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Set log level
+    export LOG_LEVEL="$LOG_LEVEL"
+    
+    # Show banner
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════════╗"
+    echo "║              OpenShift Benchmark MCP Server                     ║"
+    echo "║                     Management Script                           ║"
+    echo "╚══════════════════════════════════════════════════════════════════╝"
+    echo ""
+    
+    # Execute command
     case "$command" in
-        "start")
-            create_directories
+        help)
+            show_help
+            ;;
+        test)
             check_prerequisites
-            set_timezone
-            test_openshift_connection
-            install_dependencies "$2"
-            
-            start_mcp_server
-            sleep 5
-            start_mcp_api
-            sleep 5
-            start_mcp_client
-            
-            wait_for_services
-            
-            log "All services started successfully!"
+            test_connectivity
+            run_performance_test
+            ;;
+        status)
             show_status
-            
-            info "Chat Interface: http://localhost:8081"
-            info "API Documentation: http://localhost:8080/docs"
-            info "Use '$0 logs <service>' to view logs"
-            info "Use '$0 stop' to stop all services"
             ;;
-            
-        "stop")
+        stop)
             stop_services
-            log "All services stopped"
             ;;
-            
-        "restart")
+        restart)
             stop_services
             sleep 2
-            create_directories
             check_prerequisites
-            set_timezone
-            test_openshift_connection
-            install_dependencies "$2"
-            
+            if [[ "$skip_deps" != true ]]; then
+                install_dependencies
+            fi
+            create_directories
+            if [[ "$skip_test" != true ]]; then
+                test_connectivity
+            fi
             start_mcp_server
-            sleep 5
-            start_mcp_api
-            sleep 5
             start_mcp_client
-            
-            wait_for_services
-            
-            log "All services restarted successfully!"
             show_status
             ;;
-            
-        "status")
+        server-only)
+            check_prerequisites
+            if [[ "$skip_deps" != true ]]; then
+                install_dependencies
+            fi
+            create_directories
+            if [[ "$skip_test" != true ]]; then
+                test_connectivity
+            fi
+            start_mcp_server
             show_status
             ;;
-            
-        "logs")
-            show_logs "$2"
+        client-only)
+            check_prerequisites
+            if [[ "$skip_deps" != true ]]; then
+                install_dependencies
+            fi
+            create_directories
+            start_mcp_client
+            show_status
             ;;
+        start)
+            check_prerequisites
+            if [[ "$skip_deps" != true ]]; then
+                install_dependencies
+            fi
+            create_directories
+            if [[ "$skip_test" != true ]]; then
+                test_connectivity
+            fi
+            start_mcp_server
+            start_mcp_client
+            show_status
             
-        "test")
-            set_timezone
-            test_openshift_connection
-            test_cluster
+            log "Services started successfully!"
+            log "MCP Server: http://localhost:$MCP_SERVER_PORT"
+            log "MCP Client: http://localhost:$MCP_CLIENT_PORT"
+            log ""
+            log "To stop services: $0 stop"
+            log "To check status: $0 status"
+            log "To view logs: tail -f logs/mcp_server.log"
             ;;
-            
-        "analyze")
-            set_timezone
-            run_analysis "$2"
-            ;;
-            
-        "help"|"--help"|"-h")
-            show_usage
-            ;;
-            
         *)
             error "Unknown command: $command"
-            echo
-            show_usage
+            show_help
             exit 1
             ;;
     esac
 }
 
-# Run main function with all arguments
+# Run main function
 main "$@"

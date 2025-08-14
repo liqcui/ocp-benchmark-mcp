@@ -1,239 +1,237 @@
-#!/usr/bin/env python3
-"""OpenShift Cluster Information Module"""
-
+"""OpenShift cluster information retrieval."""
 import json
 import logging
-import asyncio
+import subprocess
 from typing import Dict, Any, Optional
 from kubernetes import client
-from ocauth.ocp_benchmark_auth import auth
+from kubernetes.client.rest import ApiException
+from ocauth.ocp_benchmark_auth import ocp_auth
+
 
 logger = logging.getLogger(__name__)
 
+
 class ClusterInfoCollector:
-    """Collect OpenShift cluster information"""
+    """Collects OpenShift cluster information."""
     
     def __init__(self):
-        self.kube_client = auth.get_kube_client()
+        self.k8s_client = ocp_auth.k8s_client
     
-    async def get_cluster_version(self) -> Optional[Dict[str, Any]]:
-        """Get cluster version information"""
+    def get_cluster_version_oc(self) -> Optional[Dict[str, Any]]:
+        """Get cluster version using oc command."""
         try:
-            custom_api = client.CustomObjectsApi(self.kube_client)
+            result = subprocess.run([
+                'oc', 'get', 'clusterversion', 'version', '-o', 'json'
+            ], capture_output=True, text=True, timeout=30)
             
-            # Get ClusterVersion resource
-            cluster_versions = custom_api.list_cluster_custom_object(
+            if result.returncode == 0:
+                version_data = json.loads(result.stdout)
+                return {
+                    'version': version_data.get('status', {}).get('desired', {}).get('version'),
+                    'channel': version_data.get('spec', {}).get('channel'),
+                    'image': version_data.get('status', {}).get('desired', {}).get('image'),
+                    'update_available': len(version_data.get('status', {}).get('availableUpdates', [])) > 0
+                }
+        except Exception as e:
+            logger.warning(f"Failed to get cluster version with oc: {e}")
+        # Fallback: use 'oc version -o json' when ClusterVersion object is not accessible
+        try:
+            result = subprocess.run(['oc', 'version', '-o', 'json'], capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout.strip():
+                data = json.loads(result.stdout)
+                # Common fields seen in oc version -o json
+                openshift_version = data.get('openshiftVersion')
+                server_version = data.get('serverVersion', {})
+                server_git_version = server_version.get('gitVersion')
+                computed_version = openshift_version or server_git_version
+                if computed_version:
+                    return {
+                        'version': computed_version,
+                        'channel': None,
+                        'image': None,
+                        'update_available': False
+                    }
+        except Exception as e:
+            logger.warning(f"Fallback 'oc version' failed: {e}")
+
+        return None
+    
+    def get_cluster_version_api(self) -> Optional[Dict[str, Any]]:
+        """Get cluster version using Kubernetes API."""
+        try:
+            custom_api = client.CustomObjectsApi(self.k8s_client)
+            version_obj = custom_api.get_cluster_custom_object(
                 group="config.openshift.io",
                 version="v1",
-                plural="clusterversions"
+                plural="clusterversions",
+                name="version"
             )
             
-            if cluster_versions.get('items'):
-                cv = cluster_versions['items'][0]
-                
-                version_info = {
-                    'name': cv['metadata']['name'],
-                    'version': cv['status'].get('desired', {}).get('version', 'unknown'),
-                    'image': cv['status'].get('desired', {}).get('image', 'unknown'),
-                    'channel': cv['spec'].get('channel', 'unknown'),
-                    'cluster_id': cv['spec'].get('clusterID', 'unknown'),
-                    'conditions': []
-                }
-                
-                # Extract conditions
-                for condition in cv['status'].get('conditions', []):
-                    version_info['conditions'].append({
-                        'type': condition.get('type'),
-                        'status': condition.get('status'),
-                        'reason': condition.get('reason'),
-                        'message': condition.get('message', '')
-                    })
-                
-                return version_info
-            
-            logger.warning("No cluster version information found")
-            return None
-            
+            return {
+                'version': version_obj.get('status', {}).get('desired', {}).get('version'),
+                'channel': version_obj.get('spec', {}).get('channel'),
+                'image': version_obj.get('status', {}).get('desired', {}).get('image'),
+                'update_available': len(version_obj.get('status', {}).get('availableUpdates', [])) > 0
+            }
         except Exception as e:
-            logger.error(f"Error getting cluster version: {e}")
-            return None
+            logger.warning(f"Failed to get cluster version with API: {e}")
+        
+        return None
     
-    async def get_cluster_name(self) -> Optional[str]:
-        """Get cluster name from DNS or infrastructure"""
+    def get_infrastructure_info_oc(self) -> Optional[Dict[str, Any]]:
+        """Get infrastructure information using oc command."""
         try:
-            custom_api = client.CustomObjectsApi(self.kube_client)
+            result = subprocess.run([
+                'oc', 'get', 'infrastructure', 'cluster', '-o', 'json'
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                infra_data = json.loads(result.stdout)
+                status = infra_data.get('status', {})
+                return {
+                    'infrastructure_name': status.get('infrastructureName'),
+                    'platform': status.get('platform'),
+                    'platform_status': status.get('platformStatus', {}),
+                    'api_server_url': status.get('apiServerURL'),
+                    'etcd_discovery_domain': status.get('etcdDiscoveryDomain')
+                }
+        except Exception as e:
+            logger.warning(f"Failed to get infrastructure info with oc: {e}")
+        
+        return None
+    
+    def get_infrastructure_info_api(self) -> Optional[Dict[str, Any]]:
+        """Get infrastructure information using Kubernetes API."""
+        try:
+            custom_api = client.CustomObjectsApi(self.k8s_client)
+            infra_obj = custom_api.get_cluster_custom_object(
+                group="config.openshift.io",
+                version="v1",
+                plural="infrastructures",
+                name="cluster"
+            )
+            
+            status = infra_obj.get('status', {})
+            return {
+                'infrastructure_name': status.get('infrastructureName'),
+                'platform': status.get('platform'),
+                'platform_status': status.get('platformStatus', {}),
+                'api_server_url': status.get('apiServerURL'),
+                'etcd_discovery_domain': status.get('etcdDiscoveryDomain')
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get infrastructure info with API: {e}")
+        
+        return None
+    
+    def get_cluster_name_oc(self) -> Optional[str]:
+        """Get cluster name using oc command."""
+        try:
+            # Try to get cluster name from DNS
+            result = subprocess.run([
+                'oc', 'get', 'dns', 'cluster', '-o', 'jsonpath={.spec.baseDomain}'
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                base_domain = result.stdout.strip()
+                # Extract cluster name from base domain
+                parts = base_domain.split('.')
+                if len(parts) >= 2:
+                    return parts[0]  # Usually cluster name is the first part
+            
+            # Fallback: try infrastructure name
+            result = subprocess.run([
+                'oc', 'get', 'infrastructure', 'cluster', '-o', 'jsonpath={.status.infrastructureName}'
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception as e:
+            logger.warning(f"Failed to get cluster name with oc: {e}")
+        
+        return None
+    
+    def get_cluster_name_api(self) -> Optional[str]:
+        """Get cluster name using Kubernetes API."""
+        try:
+            custom_api = client.CustomObjectsApi(self.k8s_client)
             
             # Try to get from DNS config
-            try:
-                dns_configs = custom_api.list_cluster_custom_object(
-                    group="config.openshift.io",
-                    version="v1",
-                    plural="dnses"
-                )
-                
-                if dns_configs.get('items'):
-                    dns_config = dns_configs['items'][0]
-                    cluster_domain = dns_config['spec'].get('baseDomain')
-                    if cluster_domain:
-                        # Extract cluster name from domain (typically first part)
-                        cluster_name = cluster_domain.split('.')[0] if '.' in cluster_domain else cluster_domain
-                        return cluster_name
-            except Exception as dns_error:
-                logger.warning(f"Could not get cluster name from DNS: {dns_error}")
-            
-            # Fallback: try from infrastructure
-            try:
-                infrastructures = custom_api.list_cluster_custom_object(
-                    group="config.openshift.io",
-                    version="v1",
-                    plural="infrastructures"
-                )
-                
-                if infrastructures.get('items'):
-                    infra = infrastructures['items'][0]
-                    return infra['status'].get('infrastructureName', 'unknown')
-            except Exception as infra_error:
-                logger.warning(f"Could not get cluster name from infrastructure: {infra_error}")
-            
-            return "unknown"
-            
-        except Exception as e:
-            logger.error(f"Error getting cluster name: {e}")
-            return None
-    
-    async def get_infrastructure_info(self) -> Optional[Dict[str, Any]]:
-        """Get infrastructure information"""
-        try:
-            custom_api = client.CustomObjectsApi(self.kube_client)
-            
-            infrastructures = custom_api.list_cluster_custom_object(
+            dns_obj = custom_api.get_cluster_custom_object(
                 group="config.openshift.io",
                 version="v1",
-                plural="infrastructures"
+                plural="dnses",
+                name="cluster"
             )
             
-            if infrastructures.get('items'):
-                infra = infrastructures['items'][0]
-                
-                infra_info = {
-                    'name': infra['metadata']['name'],
-                    'infrastructure_name': infra['status'].get('infrastructureName', 'unknown'),
-                    'platform': infra['status'].get('platform', 'unknown'),
-                    'platform_status': infra['status'].get('platformStatus', {}),
-                    'api_server_internal_url': infra['status'].get('apiServerInternalURL', 'unknown'),
-                    'api_server_url': infra['status'].get('apiServerURL', 'unknown'),
-                    'etcd_discovery_domain': infra['status'].get('etcdDiscoveryDomain', 'unknown')
-                }
-                
-                return infra_info
+            base_domain = dns_obj.get('spec', {}).get('baseDomain')
+            if base_domain:
+                parts = base_domain.split('.')
+                if len(parts) >= 2:
+                    return parts[0]
             
-            logger.warning("No infrastructure information found")
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error getting infrastructure info: {e}")
-            return None
-    
-    async def get_cluster_operators_status(self) -> Optional[Dict[str, Any]]:
-        """Get cluster operators status"""
-        try:
-            custom_api = client.CustomObjectsApi(self.kube_client)
-            
-            operators = custom_api.list_cluster_custom_object(
+            # Fallback: try infrastructure name
+            infra_obj = custom_api.get_cluster_custom_object(
                 group="config.openshift.io",
                 version="v1",
-                plural="clusteroperators"
+                plural="infrastructures",
+                name="cluster"
             )
             
-            operator_status = {
-                'total_operators': len(operators.get('items', [])),
-                'available': 0,
-                'progressing': 0,
-                'degraded': 0,
-                'operators': []
-            }
-            
-            for operator in operators.get('items', []):
-                op_info = {
-                    'name': operator['metadata']['name'],
-                    'version': 'unknown',
-                    'available': False,
-                    'progressing': False,
-                    'degraded': False
-                }
-                
-                # Check conditions
-                for condition in operator['status'].get('conditions', []):
-                    if condition['type'] == 'Available':
-                        op_info['available'] = condition['status'] == 'True'
-                        if op_info['available']:
-                            operator_status['available'] += 1
-                    elif condition['type'] == 'Progressing':
-                        op_info['progressing'] = condition['status'] == 'True'
-                        if op_info['progressing']:
-                            operator_status['progressing'] += 1
-                    elif condition['type'] == 'Degraded':
-                        op_info['degraded'] = condition['status'] == 'True'
-                        if op_info['degraded']:
-                            operator_status['degraded'] += 1
-                
-                # Get version if available
-                for version in operator['status'].get('versions', []):
-                    if version.get('name') == 'operator':
-                        op_info['version'] = version.get('version', 'unknown')
-                        break
-                
-                operator_status['operators'].append(op_info)
-            
-            return operator_status
-            
+            infra_name = infra_obj.get('status', {}).get('infrastructureName')
+            if infra_name:
+                return infra_name
         except Exception as e:
-            logger.error(f"Error getting cluster operators status: {e}")
-            return None
+            logger.warning(f"Failed to get cluster name with API: {e}")
+        
+        return None
     
-    async def get_complete_cluster_info(self) -> Dict[str, Any]:
-        """Get complete cluster information"""
-        try:
-            cluster_info = {
-                'timestamp': None,
-                'cluster_version': None,
-                'cluster_name': None,
-                'infrastructure': None,
-                'operators_status': None
-            }
-            
-            # Set timestamp
-            from datetime import datetime
-            cluster_info['timestamp'] = datetime.utcnow().isoformat() + 'Z'
-            
-            # Collect all information concurrently
-            tasks = [
-                self.get_cluster_version(),
-                self.get_cluster_name(),
-                self.get_infrastructure_info(),
-                self.get_cluster_operators_status()
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            cluster_info['cluster_version'] = results[0] if not isinstance(results[0], Exception) else None
-            cluster_info['cluster_name'] = results[1] if not isinstance(results[1], Exception) else None
-            cluster_info['infrastructure'] = results[2] if not isinstance(results[2], Exception) else None
-            cluster_info['operators_status'] = results[3] if not isinstance(results[3], Exception) else None
-            
-            return cluster_info
-            
-        except Exception as e:
-            logger.error(f"Error collecting complete cluster info: {e}")
-            return {
-                'error': str(e),
-                'timestamp': datetime.utcnow().isoformat() + 'Z'
-            }
+    def collect_cluster_info(self) -> Dict[str, Any]:
+        """Collect complete cluster information."""
+        cluster_info = {
+            'timestamp': None,  # Will be set by caller
+            'cluster_name': None,
+            'version_info': None,
+            'infrastructure_info': None,
+            'collection_method': 'mixed'
+        }
+        
+        # Try to get cluster version
+        version_info = self.get_cluster_version_oc()
+        if not version_info:
+            version_info = self.get_cluster_version_api()
+        cluster_info['version_info'] = version_info
+        
+        # Try to get infrastructure info
+        infra_info = self.get_infrastructure_info_oc()
+        if not infra_info:
+            infra_info = self.get_infrastructure_info_api()
+        cluster_info['infrastructure_info'] = infra_info
+        
+        # Try to get cluster name
+        cluster_name = self.get_cluster_name_oc()
+        if not cluster_name:
+            cluster_name = self.get_cluster_name_api()
+        cluster_info['cluster_name'] = cluster_name
+        
+        # Add summary
+        cluster_info['summary'] = {
+            'cluster_name': cluster_name,
+            'version': version_info.get('version') if version_info else 'unknown',
+            'platform': infra_info.get('platform') if infra_info else 'unknown',
+            'api_url': infra_info.get('api_server_url') if infra_info else 'unknown'
+        }
+        
+        return cluster_info
 
-# Global cluster info collector instance
-cluster_info_collector = ClusterInfoCollector()
 
-async def get_cluster_info_json() -> str:
-    """Get cluster information as JSON string"""
-    info = await cluster_info_collector.get_complete_cluster_info()
+def get_cluster_info() -> str:
+    """Get cluster information and return as JSON string."""
+    collector = ClusterInfoCollector()
+    info = collector.collect_cluster_info()
+    
+    # Add timestamp
+    from datetime import datetime
+    info['timestamp'] = datetime.utcnow().isoformat() + 'Z'
+    
     return json.dumps(info, indent=2)
