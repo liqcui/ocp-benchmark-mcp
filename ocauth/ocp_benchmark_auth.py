@@ -41,41 +41,42 @@ class OpenShiftAuth:
     async def get_prometheus_url(self) -> Optional[str]:
         """Automatically discover Prometheus URL from OpenShift monitoring"""
         try:
-            v1 = client.CoreV1Api(self.kube_client)
+            custom_api = client.CustomObjectsApi(self.kube_client)
+            routes = custom_api.list_namespaced_custom_object(
+                group="route.openshift.io",
+                version="v1",
+                namespace="openshift-monitoring",
+                plural="routes"
+            )
             
-            # Try to find prometheus service in openshift-monitoring namespace
-            services = v1.list_namespaced_service(namespace="openshift-monitoring")
-            
-            for service in services.items:
-                if "prometheus" in service.metadata.name.lower():
-                    if service.spec.ports:
-                        port = service.spec.ports[0].port
-                        # Use internal cluster DNS name
-                        prometheus_url = f"https://{service.metadata.name}.openshift-monitoring.svc.cluster.local:{port}"
-                        self.prometheus_url = prometheus_url
-                        logger.info(f"Found Prometheus URL: {prometheus_url}")
-                        return prometheus_url
-            
-            # Fallback: try to find route
+            for route in routes.get('items', []):
+                if "prometheus" in route['metadata']['name'].lower():
+                    host = route['spec'].get('host')
+                    if host:
+                        self.prometheus_url = f"https://{host}"
+                        logger.info(f"Found Prometheus route: {self.prometheus_url}")
+                        return self.prometheus_url
+                                    
+            # Fallback: try to find service
             try:
-                custom_api = client.CustomObjectsApi(self.kube_client)
-                routes = custom_api.list_namespaced_custom_object(
-                    group="route.openshift.io",
-                    version="v1",
-                    namespace="openshift-monitoring",
-                    plural="routes"
-                )
+                v1 = client.CoreV1Api(self.kube_client)
                 
-                for route in routes.get('items', []):
-                    if "prometheus" in route['metadata']['name'].lower():
-                        host = route['spec'].get('host')
-                        if host:
-                            self.prometheus_url = f"https://{host}"
-                            logger.info(f"Found Prometheus route: {self.prometheus_url}")
-                            return self.prometheus_url
+                # Try to find prometheus service in openshift-monitoring namespace
+                services = v1.list_namespaced_service(namespace="openshift-monitoring")
+                
+                for service in services.items:
+                    if "prometheus" in service.metadata.name.lower():
+                        if service.spec.ports:
+                            port = service.spec.ports[0].port
+                            # Use internal cluster DNS name
+                            prometheus_url = f"https://{service.metadata.name}.openshift-monitoring.svc.cluster.local:{port}"
+                            self.prometheus_url = prometheus_url
+                            logger.info(f"Found Prometheus URL: {prometheus_url}")
+                            return prometheus_url
+                
                             
-            except Exception as route_error:
-                logger.warning(f"Could not fetch routes: {route_error}")
+            except Exception as service_error:
+                logger.warning(f"Could not fetch routes: {service_error}")
             
             logger.error("Could not discover Prometheus URL")
             return None
