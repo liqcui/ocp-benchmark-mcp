@@ -466,7 +466,7 @@ async def get_api_request_latency_metrics(params: APILatencyParams) -> str:
     """Get API server and etcd latency metrics.
     
     This tool queries Prometheus for API performance including:
-    - API server request latency (P50, P95, P99 percentiles)
+    - API server request latency (P99 percentiles)
     - API request rates by operation and response code
     - etcd request latency metrics
     - Comparison against configured baselines
@@ -501,7 +501,7 @@ async def get_api_request_rate_metrics(params: APILatencyParams) -> str:
     """Get API server and etcd latency metrics.
     
     This tool queries Prometheus for API performance including:
-    - API server request latency (P50, P95, P99 percentiles)
+    - API server request latency (P99 percentiles)
     - API request rates by operation and response code
     - etcd request latency metrics
     - Comparison against configured baselines

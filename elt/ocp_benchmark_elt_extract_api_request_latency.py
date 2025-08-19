@@ -86,7 +86,7 @@ def extract_operation_statistics(input_data, operation_name=None):
                 continue
             
             # Extract p95 and p99 statistics
-            p95_stats = op_data.get("p95", {}).get("statistics", {})
+            # p95_stats = op_data.get("p95", {}).get("statistics", {})
             p99_stats = op_data.get("p99", {}).get("statistics", {})
             
             # Helper function to round numbers to 2 decimal places
@@ -96,15 +96,15 @@ def extract_operation_statistics(input_data, operation_name=None):
                 return 0.0
             
             result[op_name] = {
-                "p95": {
-                    "statistics": {
-                        "min": round_value(p95_stats.get("min", 0.0)),
-                        "max": round_value(p95_stats.get("max", 0.0)),
-                        "mean": round_value(p95_stats.get("mean", 0.0)),
-                        "count": p95_stats.get("count", 0)
-                    },
-                    "unit": op_data.get("p95", {}).get("unit", "ms")
-                },
+                # "p95": {
+                #     "statistics": {
+                #         "min": round_value(p95_stats.get("min", 0.0)),
+                #         "max": round_value(p95_stats.get("max", 0.0)),
+                #         "mean": round_value(p95_stats.get("mean", 0.0)),
+                #         "count": p95_stats.get("count", 0)
+                #     },
+                #     "unit": op_data.get("p95", {}).get("unit", "ms")
+                # },
                 "p99": {
                     "statistics": {
                         "min": round_value(p99_stats.get("min", 0.0)),
@@ -151,17 +151,17 @@ def extract_cluster_summary(input_data):
             return 0.0
         
         # Extract p95_overall and p99_overall
-        p95_overall = cluster_summary.get("p95_overall", {})
+        # p95_overall = cluster_summary.get("p95_overall", {})
         p99_overall = cluster_summary.get("p99_overall", {})
         
         result = {
-            "cluster_summary": {
-                "p95_overall": {
-                    "min": round_value(p95_overall.get("min")),
-                    "max": round_value(p95_overall.get("max")),
-                    "mean": round_value(p95_overall.get("mean")),
-                    "count": p95_overall.get("count", 0)
-                },
+            # "cluster_summary": {
+            #     "p95_overall": {
+            #         "min": round_value(p95_overall.get("min")),
+            #         "max": round_value(p95_overall.get("max")),
+            #         "mean": round_value(p95_overall.get("mean")),
+            #         "count": p95_overall.get("count", 0)
+            #     },
                 "p99_overall": {
                     "min": round_value(p99_overall.get("min")),
                     "max": round_value(p99_overall.get("max")),
@@ -169,7 +169,7 @@ def extract_cluster_summary(input_data):
                     "count": p99_overall.get("count", 0)
                 }
             }
-        }
+        
         
         return result
         
@@ -223,15 +223,15 @@ if __name__ == "__main__":
         "api_server_latency": {
             "operations": {
                 "LIST:helmchartrepositories": {
-                    "p95": {
-                        "statistics": {
-                            "min": 1.5,
-                            "max": 25.75,
-                            "mean": 10.25,
-                            "count": 100
-                        },
-                        "unit": "ms"
-                    },
+                    # "p95": {
+                    #     "statistics": {
+                    #         "min": 1.5,
+                    #         "max": 25.75,
+                    #         "mean": 10.25,
+                    #         "count": 100
+                    #     },
+                    #     "unit": "ms"
+                    # },
                     "p99": {
                         "statistics": {
                             "min": 2.1,
@@ -244,12 +244,12 @@ if __name__ == "__main__":
                 }
             },
             "cluster_summary": {
-                "p95_overall": {
-                    "min": float('nan'),
-                    "max": float('nan'),
-                    "mean": float('nan'),
-                    "count": 93757
-                },
+                # "p95_overall": {
+                #     "min": float('nan'),
+                #     "max": float('nan'),
+                #     "mean": float('nan'),
+                #     "count": 93757
+                # },
                 "p99_overall": {
                     "min": float('nan'),
                     "max": float('nan'),

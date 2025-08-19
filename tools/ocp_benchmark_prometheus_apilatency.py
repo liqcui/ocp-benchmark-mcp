@@ -490,16 +490,16 @@ class APILatencyCollector:
             #     analysis['summary']['high_latency_operations'] += 1
             
             # Check P95 latency
-            p95_mean = summary_stats.get('p95_mean_ms', 0)
-            if p95_mean > baselines.get('p95', 500):
-                analysis['alerts'].append({
-                    'type': 'high_p95_latency',
-                    'operation': operation,
-                    'current_ms': round(p95_mean, 6),
-                    'baseline_ms': round(baselines.get('p95', 500), 6),
-                    'severity': 'warning' if p95_mean < baselines.get('p95', 500) * 2 else 'critical'
-                })
-                analysis['summary']['high_latency_operations'] += 1
+            # p95_mean = summary_stats.get('p95_mean_ms', 0)
+            # if p95_mean > baselines.get('p95', 500):
+            #     analysis['alerts'].append({
+            #         'type': 'high_p95_latency',
+            #         'operation': operation,
+            #         'current_ms': round(p95_mean, 6),
+            #         'baseline_ms': round(baselines.get('p95', 500), 6),
+            #         'severity': 'warning' if p95_mean < baselines.get('p95', 500) * 2 else 'critical'
+            #     })
+            #     analysis['summary']['high_latency_operations'] += 1
             
             # Check P99 latency
             p99_mean = summary_stats.get('p99_mean_ms', 0)

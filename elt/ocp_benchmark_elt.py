@@ -217,11 +217,11 @@ class BenchmarkDataProcessor:
             row = {
                 'operation': operation,
                 'metric_type': 'api_server_latency',
-                'p50_mean_ms': summary_stats.get('p50_mean_ms', 0),
-                'p95_mean_ms': summary_stats.get('p95_mean_ms', 0),
+                # 'p50_mean_ms': summary_stats.get('p50_mean_ms', 0),
+                # 'p95_mean_ms': summary_stats.get('p95_mean_ms', 0),
                 'p99_mean_ms': summary_stats.get('p99_mean_ms', 0),
-                'p50_max_ms': summary_stats.get('p50_max_ms', 0),
-                'p95_max_ms': summary_stats.get('p95_max_ms', 0),
+                # 'p50_max_ms': summary_stats.get('p50_max_ms', 0),
+                # 'p95_max_ms': summary_stats.get('p95_max_ms', 0),
                 'p99_max_ms': summary_stats.get('p99_max_ms', 0),
                 'timestamp': api_data.get('timestamp', ''),
                 'collection_duration_hours': api_data.get('collection_period', {}).get('duration_hours', 0)
@@ -235,11 +235,11 @@ class BenchmarkDataProcessor:
             row = {
                 'operation': operation,
                 'metric_type': 'etcd_latency',
-                'p50_mean_ms': 0,  # etcd only provides p99
-                'p95_mean_ms': 0,
+                # 'p50_mean_ms': 0,  # etcd only provides p99
+                # 'p95_mean_ms': 0,
                 'p99_mean_ms': latency_stats.get('mean', 0),
-                'p50_max_ms': 0,
-                'p95_max_ms': 0,
+                # 'p50_max_ms': 0,
+                # 'p95_max_ms': 0,
                 'p99_max_ms': latency_stats.get('max', 0),
                 'timestamp': api_data.get('timestamp', ''),
                 'collection_duration_hours': api_data.get('collection_period', {}).get('duration_hours', 0)
