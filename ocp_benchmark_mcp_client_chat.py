@@ -257,11 +257,15 @@ def create_mcp_tools() -> List[MCPTool]:
             mcp_tool_name="analyze_ocp_overall_cluster_performance"
         ),
         MCPTool(
-            name="identify_performance_bottlenecks",
-            description="Analyze cluster performance bottlenecks",
-            mcp_tool_name="identify_performance_bottlenecks"
-        )     
-
+                name="identify_performance_bottlenecks",
+                description="Analyze cluster performance bottlenecks",
+                mcp_tool_name="identify_performance_bottlenecks"
+            ),
+        MCPTool(
+            name="generate_performance_recommendations",
+            description="Generate ocp cluster performance recommendations",
+            mcp_tool_name="generate_performance_recommendations"
+        )
         
     ]
 

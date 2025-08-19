@@ -128,6 +128,16 @@ class IdentifyBottlenecksParams(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
 
+class GenerateRecommendationsParams(BaseModel):
+    """Parameters for generating performance recommendations."""
+    duration_hours: float = Field(default=1.0, description="Duration in hours to collect data for")
+    step: str = Field(default='1m', description="Query resolution step")
+    focus: Optional[List[str]] = Field(default=None, description="Filter categories: CPU Optimization, Memory Optimization, Storage Optimization, Network Optimization, Resource Balancing")
+    max_items: int = Field(default=20, description="Limit number of recommendations")
+    include_pod_hotspots: bool = Field(default=False, description="Include rightsizing recs for top pods")
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+
+
 # Initialize FastMCP
 mcp = FastMCP("OpenShift Benchmark MCP Server")
 
@@ -1026,6 +1036,7 @@ async def identify_performance_bottlenecks(params: IdentifyBottlenecksParams) ->
     except Exception as e:
         logger.error(f"Failed to identify performance bottlenecks: {e}")
         return f'{{"error": "Failed to identify performance bottlenecks: {str(e)}"}}'
+
 @mcp.tool()
 async def analyze_ocp_performance_data(params: AnalyzePerformanceParams) -> str:
     """Analyze performance data and generate insights.
@@ -1051,6 +1062,105 @@ async def analyze_ocp_performance_data(params: AnalyzePerformanceParams) -> str:
     except Exception as e:
         logger.error(f"Failed to analyze performance data: {e}")
         return f'{{"error": "Failed to analyze performance data: {str(e)}"}}'
+
+@mcp.tool()
+async def generate_performance_recommendations(params: GenerateRecommendationsParams) -> str:
+    """Generate prioritized performance optimization recommendations.
+
+    Collects key metrics, runs component analyses, and aggregates actionable recommendations.
+    """
+    try:
+        duration_hours = params.duration_hours
+        step = params.step
+        focus_set = {f.strip() for f in params.focus} if isinstance(params.focus, list) else None
+        max_items = max(1, min(int(params.max_items), 100))
+
+        # Collect raw component data
+        nodes_raw = get_nodes_usage(duration_hours, step)
+        disk_raw = get_disk_metrics(duration_hours, step)
+        network_raw = get_network_metrics(duration_hours, step)
+        api_latency_raw = get_api_request_latency(duration_hours, step)
+
+        # Use comprehensive analyzer to derive recommendations per component
+        from analysis.ocp_benchmark_performance_analysis import analyze_comprehensive_performance
+
+        recommendations: List[Dict[str, Any]] = []
+
+        try:
+            nodes_combined = extract_all_cluster_usage_info(nodes_raw)
+            nodes_analysis = analyze_comprehensive_performance(nodes_combined)
+            na = json.loads(nodes_analysis)
+            recommendations.extend(na.get('optimization_recommendations', []))
+        except Exception as e:
+            logger.warning(f"Nodes recommendations failed: {e}")
+
+        for raw_data, label in (
+            (disk_raw, 'disk'),
+            (network_raw, 'network'),
+            (api_latency_raw, 'api'),
+        ):
+            try:
+                comp_analysis = analyze_comprehensive_performance(json.loads(raw_data))
+                ca = json.loads(comp_analysis)
+                recommendations.extend(ca.get('optimization_recommendations', []))
+            except Exception as e:
+                logger.warning(f"{label} recommendations failed: {e}")
+
+        # Optional pod-based rightsizing suggestions
+        if params.include_pod_hotspots:
+            try:
+                pods_raw = get_pods_usage(duration_hours, None, None, step)
+                pods_json = json.loads(pods_raw)
+                pod_stats = get_pod_names_and_basic_stats(pods_json)
+                top_cpu = sorted(
+                    ((p, s.get('cpu_mean')) for p, s in pod_stats.items() if isinstance(s.get('cpu_mean'), (int, float))),
+                    key=lambda x: x[1], reverse=True
+                )[:5]
+                top_mem = sorted(
+                    ((p, s.get('memory_mean')) for p, s in pod_stats.items() if isinstance(s.get('memory_mean'), (int, float))),
+                    key=lambda x: x[1], reverse=True
+                )[:5]
+                if top_cpu or top_mem:
+                    recommendations.append({
+                        'category': 'Resource Balancing',
+                        'priority': 'medium',
+                        'issue': 'High resource usage detected on top pods',
+                        'recommendation': 'Rightsize requests/limits and consider pod rebalancing',
+                        'impact': 'Improves cluster efficiency and reduces contention',
+                        'effort': 'low',
+                        'evidence': {
+                            'top_cpu_pods': [{'pod': p, 'cpu_mean': round(float(v), 2)} for p, v in top_cpu],
+                            'top_memory_pods': [{'pod': p, 'memory_mean': round(float(v), 2)} for p, v in top_mem]
+                        }
+                    })
+            except Exception as e:
+                logger.warning(f"Pod hotspot recommendations failed: {e}")
+
+        # Filter and de-duplicate
+        if focus_set:
+            recommendations = [r for r in recommendations if r.get('category') in focus_set]
+
+        seen = set()
+        deduped: List[Dict[str, Any]] = []
+        for r in recommendations:
+            key = (r.get('category'), r.get('issue'), r.get('recommendation'))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(r)
+
+        prio_rank = {'high': 3, 'medium': 2, 'low': 1}
+        deduped.sort(key=lambda x: prio_rank.get(str(x.get('priority', 'low')).lower(), 0), reverse=True)
+
+        result = {
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'time_window_hours': duration_hours,
+            'count': min(len(deduped), max_items),
+            'recommendations': deduped[:max_items]
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to generate performance recommendations: {e}")
+        return f'{{"error": "Failed to generate performance recommendations: {str(e)}"}}'
 
 
 async def main():
