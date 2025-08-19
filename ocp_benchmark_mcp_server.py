@@ -31,7 +31,7 @@ from tools.ocp_benchmark_prometheus_apilatency import get_api_request_latency,ge
 from elt.ocp_benchmark_elt import analyze_performance_data,benchmark_data_processor
 from elt.ocp_benchmark_elt_extract_node_info import extract_node_info_from_json_data_as_json
 from elt.ocp_benchmark_elt_extract_nodes_usage import extract_all_cluster_usage_info
-from elt.ocp_benchmark_elt_extract_pods_usage import extract_summary,extract_pod_totals
+from elt.ocp_benchmark_elt_extract_pods_usage import extract_summary,extract_pod_totals,get_pod_names_and_basic_stats
 from elt.ocp_benchmark_elt_extract_disk_io import extract_performance_analysis,extract_nodes_performance_data
 from elt.ocp_benchmark_elt_extract_api_request_latency import extract_api_performance_analysis,extract_operation_statistics
 from elt.ocp_benchmark_elt_extract_api_request_rate import extract_request_rate_performance_analysis,extract_active_request_rates
@@ -115,6 +115,16 @@ class AnalyzeOverallParams(BaseModel):
     """Parameters for overall cluster performance analysis."""
     duration_hours: float = Field(default=1.0, description="Duration in hours to collect data for")
     step: str = Field(default='1m', description="Query resolution step")
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+
+
+class IdentifyBottlenecksParams(BaseModel):
+    """Parameters for performance bottleneck identification."""
+    duration_hours: float = Field(default=1.0, description="Duration in hours to collect data for")
+    step: str = Field(default='1m', description="Query resolution step")
+    top_n_nodes: int = Field(default=5, description="How many top nodes to include per resource")
+    components: Optional[List[str]] = Field(default=None, description="Limit analysis to components: cpu,memory,disk,network,api,pods")
+    include_pod_hotspots: bool = Field(default=False, description="Include top pod hotspots by CPU/memory")
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
 
@@ -742,6 +752,280 @@ async def analyze_ocp_overall_cluster_performance(params: AnalyzeOverallParams) 
     except Exception as e:
         logger.error(f"Failed to analyze overall cluster performance: {e}")
         return f'{{"error": "Failed to analyze overall cluster performance: {str(e)}"}}'
+
+@mcp.tool()
+async def identify_performance_bottlenecks(params: IdentifyBottlenecksParams) -> str:
+    """Identify cross-component performance bottlenecks.
+
+    Aggregates node CPU/memory, disk I/O, network, and API latency metrics, then
+    flags potential bottlenecks with severity, evidence, and suggested actions.
+
+    Returns a compact JSON with a ranked list of bottlenecks.
+    """
+    try:
+        duration_hours = params.duration_hours
+        step = params.step
+        try:
+            top_n = max(1, min(int(params.top_n_nodes), 20))
+        except Exception:
+            top_n = 5
+
+        # Component filter
+        comp_filter = None
+        if isinstance(getattr(params, 'components', None), list) and params.components:
+            comp_filter = {c.strip().lower() for c in params.components}
+
+        # Collect raw metrics (use underlying metric functions directly)
+        nodes_raw = get_nodes_usage(duration_hours, step) if (not comp_filter or {'cpu','memory','pods'} & comp_filter) else None
+        disk_raw = get_disk_metrics(duration_hours, step) if (not comp_filter or 'disk' in comp_filter) else None
+        network_raw = get_network_metrics(duration_hours, step) if (not comp_filter or 'network' in comp_filter) else None
+        api_latency_raw = get_api_request_latency(duration_hours, step) if (not comp_filter or 'api' in comp_filter) else None
+
+        bottlenecks = []
+        severity_order = {"critical": 3, "warning": 2, "info": 1, "normal": 0}
+        thresholds = config_manager.get_thresholds()
+
+        # Analyze nodes (CPU/Memory)
+        try:
+            if not nodes_raw:
+                raise RuntimeError("nodes_raw skipped by component filter")
+            nodes_combined = extract_all_cluster_usage_info(nodes_raw)
+            cluster_stats = nodes_combined.get('cluster_statistics', {})
+            baseline_comp = nodes_combined.get('baseline_comparison', {})
+            node_stats = nodes_combined.get('node_statistics', {})
+
+            # Helper to collect top-N nodes by a metric
+            def top_nodes_by(metric_key):
+                ranked = []
+                for node_name, data in node_stats.items():
+                    metric = data.get(metric_key, {}).get('statistics', {})
+                    mean_val = metric.get('mean')
+                    if isinstance(mean_val, (int, float)):
+                        ranked.append((node_name, float(mean_val)))
+                ranked.sort(key=lambda x: x[1], reverse=True)
+                return [{"node": n, "mean_percent": round(v, 2)} for n, v in ranked[:top_n]]
+
+            # CPU baseline/status
+            cpu_bc = baseline_comp.get('cpu', {})
+            cpu_status = cpu_bc.get('status', 'normal')
+            if cpu_status in ("warning", "critical"):
+                bottlenecks.append({
+                    "component": "cpu",
+                    "severity": cpu_status,
+                    "summary": "Cluster CPU usage exceeds baseline",
+                    "evidence": {
+                        "current_mean": cpu_bc.get('current_mean'),
+                        "current_max": cpu_bc.get('current_max'),
+                        "baseline_mean": cpu_bc.get('baseline_mean'),
+                        "baseline_max": cpu_bc.get('baseline_max'),
+                        "top_nodes": top_nodes_by('cpu_usage')
+                    },
+                    "suggested_actions": [
+                        "Scale workloads or add CPU capacity",
+                        "Review pod CPU requests/limits and scheduling"
+                    ]
+                })
+
+            # Memory baseline/status
+            mem_bc = baseline_comp.get('memory', {})
+            mem_status = mem_bc.get('status', 'normal')
+            if mem_status in ("warning", "critical"):
+                bottlenecks.append({
+                    "component": "memory",
+                    "severity": mem_status,
+                    "summary": "Cluster memory usage exceeds baseline",
+                    "evidence": {
+                        "current_mean": mem_bc.get('current_mean'),
+                        "current_max": mem_bc.get('current_max'),
+                        "baseline_mean": mem_bc.get('baseline_mean'),
+                        "baseline_max": mem_bc.get('baseline_max'),
+                        "top_nodes": top_nodes_by('memory_usage')
+                    },
+                    "suggested_actions": [
+                        "Add memory or tune memory-intensive workloads",
+                        "Audit OOM events and adjust limits"
+                    ]
+                })
+
+            # Threshold-based flags even if baseline says normal
+            cpu_thresh = thresholds.get('cpu', {})
+            mem_thresh = thresholds.get('memory', {})
+            cpu_mean = (cluster_stats.get('cpu_usage', {}) or {}).get('mean')
+            mem_mean = (cluster_stats.get('memory_usage', {}) or {}).get('mean')
+            if isinstance(cpu_mean, (int, float)) and cpu_mean >= cpu_thresh.get('warning', 80.0) and cpu_status == 'normal':
+                sev = 'critical' if cpu_mean >= cpu_thresh.get('critical', 95.0) else 'warning'
+                bottlenecks.append({
+                    "component": "cpu",
+                    "severity": sev,
+                    "summary": "High average CPU utilization",
+                    "evidence": {
+                        "cluster_mean": round(float(cpu_mean), 2),
+                        "warning_threshold": cpu_thresh.get('warning'),
+                        "critical_threshold": cpu_thresh.get('critical'),
+                        "top_nodes": top_nodes_by('cpu_usage')
+                    },
+                    "suggested_actions": [
+                        "Scale nodes or redistribute workloads",
+                        "Investigate hot pods and reduce CPU throttling"
+                    ]
+                })
+            if isinstance(mem_mean, (int, float)) and mem_mean >= mem_thresh.get('warning', 85.0) and mem_status == 'normal':
+                sev = 'critical' if mem_mean >= mem_thresh.get('critical', 98.0) else 'warning'
+                bottlenecks.append({
+                    "component": "memory",
+                    "severity": sev,
+                    "summary": "High average memory utilization",
+                    "evidence": {
+                        "cluster_mean": round(float(mem_mean), 2),
+                        "warning_threshold": mem_thresh.get('warning'),
+                        "critical_threshold": mem_thresh.get('critical'),
+                        "top_nodes": top_nodes_by('memory_usage')
+                    },
+                    "suggested_actions": [
+                        "Add memory capacity or optimize memory usage",
+                        "Review eviction/OOM and rightsizing"
+                    ]
+                })
+        except Exception as e:
+            logger.warning(f"Node analysis failed: {e}")
+
+        # Analyze disk I/O
+        try:
+            if not disk_raw:
+                raise RuntimeError("disk_raw skipped by component filter")
+            disk_pa = extract_performance_analysis(json.loads(disk_raw))
+            alerts = disk_pa.get('alerts', []) if isinstance(disk_pa, dict) else []
+            for alert in alerts:
+                severity = alert.get('severity', 'warning')
+                bottlenecks.append({
+                    "component": "disk",
+                    "severity": severity,
+                    "summary": alert.get('description') or alert.get('type', 'disk_issue'),
+                    "evidence": {
+                        "current": alert.get('current'),
+                        "baseline": alert.get('baseline'),
+                        "device": alert.get('device'),
+                        "node": alert.get('node')
+                    },
+                    "suggested_actions": [
+                        "Investigate storage latency/IOPS on affected nodes",
+                        "Consider faster disks or tune I/O patterns"
+                    ]
+                })
+        except Exception as e:
+            logger.warning(f"Disk analysis failed: {e}")
+
+        # Analyze network
+        try:
+            if not network_raw:
+                raise RuntimeError("network_raw skipped by component filter")
+            net_pa = extract_performance_analysis(json.loads(network_raw))
+            alerts = net_pa.get('alerts', []) if isinstance(net_pa, dict) else []
+            for alert in alerts:
+                severity = alert.get('severity', 'warning')
+                bottlenecks.append({
+                    "component": "network",
+                    "severity": severity,
+                    "summary": alert.get('description') or alert.get('type', 'network_issue'),
+                    "evidence": {
+                        "current_mbps": alert.get('current_mbps') or alert.get('current'),
+                        "baseline_mbps": alert.get('baseline_mbps') or alert.get('baseline'),
+                        "interface": alert.get('interface'),
+                        "node": alert.get('node')
+                    },
+                    "suggested_actions": [
+                        "Check NIC errors/drops and MTU configuration",
+                        "Validate bandwidth and QoS policies"
+                    ]
+                })
+        except Exception as e:
+            logger.warning(f"Network analysis failed: {e}")
+
+        # Analyze API latency/etcd
+        try:
+            if not api_latency_raw:
+                raise RuntimeError("api_latency_raw skipped by component filter")
+            api_pa_wrapped = extract_api_performance_analysis(json.loads(api_latency_raw))
+            pa = api_pa_wrapped.get('performance_analysis', {}) if isinstance(api_pa_wrapped, dict) else {}
+            overall = pa.get('overall_status', 'normal')
+            if overall in ("degraded", "critical"):
+                bottlenecks.append({
+                    "component": "api",
+                    "severity": "critical" if overall == "critical" else "warning",
+                    "summary": "API server latency degradation detected",
+                    "evidence": pa.get('summary', {}),
+                    "suggested_actions": [
+                        "Review top-latency operations and scale API servers",
+                        "Investigate etcd latency and network between API/etcd"
+                    ]
+                })
+            for alert in pa.get('alerts', []):
+                sev = alert.get('severity', 'warning')
+                bottlenecks.append({
+                    "component": "api",
+                    "severity": sev,
+                    "summary": alert.get('type', 'api_issue'),
+                    "evidence": {k: v for k, v in alert.items() if k not in ('type', 'severity')},
+                    "suggested_actions": [
+                        "Scale API/etcd or tune kube-apiserver flags",
+                        "Check request patterns and client-side retries"
+                    ]
+                })
+        except Exception as e:
+            logger.warning(f"API latency analysis failed: {e}")
+
+        # Optional: include pod hotspots when requested
+        if getattr(params, 'include_pod_hotspots', False) and nodes_raw:
+            try:
+                pods_raw = get_pods_usage(duration_hours, None, None, step)
+                pods_json = json.loads(pods_raw)
+                pod_stats = get_pod_names_and_basic_stats(pods_json)
+                def top_by_key(key):
+                    ranked = []
+                    for pod, stats in pod_stats.items():
+                        val = stats.get(key)
+                        if isinstance(val, (int, float)):
+                            ranked.append((pod, float(val)))
+                    ranked.sort(key=lambda x: x[1], reverse=True)
+                    return [{"pod": p, key: round(v, 2)} for p, v in ranked[:top_n]]
+                bottlenecks.append({
+                    "component": "pods",
+                    "severity": "info",
+                    "summary": "Top pod hotspots by CPU/memory",
+                    "evidence": {
+                        "top_cpu_pods": top_by_key('cpu_mean'),
+                        "top_memory_pods": top_by_key('memory_mean')
+                    },
+                    "suggested_actions": [
+                        "Investigate top pods for resource spikes and rightsizing",
+                        "Review limits/requests and placement constraints"
+                    ]
+                })
+            except Exception as e:
+                logger.warning(f"Pod hotspot analysis failed: {e}")
+
+        # Rank bottlenecks by severity
+        def sev_rank(s):
+            return severity_order.get(s, 0)
+        bottlenecks.sort(key=lambda b: sev_rank(b.get('severity', 'info')), reverse=True)
+
+        # Build summary
+        severity_counts = {}
+        for b in bottlenecks:
+            sev = b.get('severity', 'info')
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+        result = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "time_window_hours": duration_hours,
+            "bottleneck_count": len(bottlenecks),
+            "severity_counts": severity_counts,
+            "bottlenecks": bottlenecks,
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to identify performance bottlenecks: {e}")
+        return f'{{"error": "Failed to identify performance bottlenecks: {str(e)}"}}'
 @mcp.tool()
 async def analyze_ocp_performance_data(params: AnalyzePerformanceParams) -> str:
     """Analyze performance data and generate insights.
