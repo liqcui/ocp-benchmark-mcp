@@ -209,7 +209,7 @@ MIT License
  
 ---
 
-## Quick Start (Addendum)
+## Quick Start
 
 Follow these steps without removing any of the above instructions:
 
