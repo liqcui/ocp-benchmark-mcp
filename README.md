@@ -1,16 +1,23 @@
-# OpenShift Benchmark MCP Server
+# OpenShift Benchmark MCP Server (AI‑Powered)
 
-This MCP (Model Context Protocol) server provides comprehensive OpenShift cluster performance monitoring and benchmarking capabilities through integration with Prometheus metrics and OpenShift APIs.
+This AI‑assisted MCP platform fuses Prometheus metrics and OpenShift APIs with a Large Language Model agent to transform raw telemetry into actionable, executive‑ready performance insights.
 
 ## Features
 
-- **Cluster Information**: Automatically discover cluster details, version, and infrastructure
-- **Node Monitoring**: Track CPU, memory, and resource utilization across master, worker, and infra nodes
-- **Pod Metrics**: Monitor pod-level performance with flexible filtering
-- **Prometheus Integration**: Query metrics using configurable PromQL queries
-- **Performance Analysis**: Compare current metrics against configurable baselines
-- **AI-Powered Reporting**: Generate performance reports with recommendations
-- **Web Interface**: Interactive HTML interface for real-time monitoring
+- **AI Analysis Agent**: LLM‑driven reasoning and autonomous analysis flows (LangGraph)
+- **AI‑Generated Reports**: Executive summaries, benchmarks, and prioritized recommendations (Excel/PDF)
+- **Natural Language Chat**: Run analyses by asking questions—no query language required
+- **Cluster Information**: Auto‑discover version and infrastructure
+- **Node/Pod Monitoring**: CPU/memory utilization with baselines and alerts
+- **Prometheus Integration**: Configurable PromQL queries
+- **Web Interface**: Readable HTML tables and streaming responses
+
+## AI‑Powered Highlights
+
+- Autonomous data collection → analysis → report generation
+- Capacity forecasting with risk scoring
+- Baseline comparison and anomaly surfacing
+- Conversational “tools” that map prompts to actions
 
 ## Architecture Topology
 ```
