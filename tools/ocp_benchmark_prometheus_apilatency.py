@@ -262,7 +262,7 @@ class APILatencyCollector:
         try:
             # Collect all API latency metrics
             # p50_data = self.get_api_request_latency_p50(start_time, end_time, step)
-            p95_data = self.get_api_request_latency_p95(start_time, end_time, step)
+            # p95_data = self.get_api_request_latency_p95(start_time, end_time, step)
             p99_data = self.get_api_request_latency_p99(start_time, end_time, step)
             
             # Combine latency data by operation
@@ -271,30 +271,30 @@ class APILatencyCollector:
             
             # Collect all operations from P50, P95, P99
             # for data in [p50_data, p95_data, p99_data]:
-            for data in [p95_data,p99_data]:
+            for data in [p99_data]:
                 all_operations.update(data.get('operations', {}).keys())
             
             for operation in all_operations:
                 combined_latency[operation] = {
                     # 'p50': p50_data.get('operations', {}).get(operation, {}),
-                    'p95': p95_data.get('operations', {}).get(operation, {}),
+                    # 'p95': p95_data.get('operations', {}).get(operation, {}),
                     'p99': p99_data.get('operations', {}).get(operation, {}),
                     'summary_stats': {}
                 }
                 
                 # Calculate summary statistics across percentiles
                 # p50_stats = combined_latency[operation]['p50'].get('statistics', {})
-                p95_stats = combined_latency[operation]['p95'].get('statistics', {})
+                # p95_stats = combined_latency[operation]['p95'].get('statistics', {})
                 p99_stats = combined_latency[operation]['p99'].get('statistics', {})
                 
                 if p99_stats:
                 # if p50_stats and p95_stats and p99_stats:
                     combined_latency[operation]['summary_stats'] = {
                         # 'p50_mean_ms': round(p50_stats.get('mean', 0), 6),
-                        'p95_mean_ms': round(p95_stats.get('mean', 0), 6),
+                        # 'p95_mean_ms': round(p95_stats.get('mean', 0), 6),
                         'p99_mean_ms': round(p99_stats.get('mean', 0), 6),
                         # 'p50_max_ms': round(p50_stats.get('max', 0), 6),
-                        'p95_max_ms': round(p95_stats.get('max', 0), 6),
+                        # 'p95_max_ms': round(p95_stats.get('max', 0), 6),
                         'p99_max_ms': round(p99_stats.get('max', 0), 6)
                     }
         
@@ -320,13 +320,13 @@ class APILatencyCollector:
                     'operations': combined_latency,
                     'cluster_summary': {
                         # 'p50_overall': p50_data.get('cluster_statistics', {}),
-                        'p95_overall': p95_data.get('cluster_statistics', {}),
+                        # 'p95_overall': p95_data.get('cluster_statistics', {}),
                         'p99_overall': p99_data.get('cluster_statistics', {})
                     }
                 },
                 'queries_executed': {
                     # 'latency_p50': p50_data['query'],
-                    'latency_p95': p95_data['query'],
+                    # 'latency_p95': p95_data['query'],
                     'latency_p99': p99_data['query']
                 }
             }
