@@ -37,6 +37,7 @@ from elt.ocp_benchmark_elt_extract_api_request_latency import extract_api_perfor
 from elt.ocp_benchmark_elt_extract_api_request_rate import extract_request_rate_performance_analysis,extract_active_request_rates
 from elt.ocp_benchmark_elt_extract_etcd_latency import extract_etcd_performance_analysis,extract_active_operations
 from elt.ocp_benchmark_extract_json import JSONExtractor
+from analysis.ocp_benchmark_performance_analysis import analyze_comprehensive_performance
 from config.ocp_benchmark_config import config_manager
 from ocauth.ocp_benchmark_auth import ocp_auth
 
@@ -1082,7 +1083,7 @@ async def generate_performance_recommendations(params: GenerateRecommendationsPa
         api_latency_raw = get_api_request_latency(duration_hours, step)
 
         # Use comprehensive analyzer to derive recommendations per component
-        from analysis.ocp_benchmark_performance_analysis import analyze_comprehensive_performance
+        
 
         recommendations: List[Dict[str, Any]] = []
 

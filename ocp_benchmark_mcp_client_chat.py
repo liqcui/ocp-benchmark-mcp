@@ -263,7 +263,7 @@ def create_mcp_tools() -> List[MCPTool]:
             ),
         MCPTool(
             name="generate_performance_recommendations",
-            description="Generate ocp cluster performance recommendations",
+            description="generate performance recommendations",
             mcp_tool_name="generate_performance_recommendations"
         )
         
