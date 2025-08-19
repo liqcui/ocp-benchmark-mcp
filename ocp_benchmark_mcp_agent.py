@@ -1155,6 +1155,8 @@ class OCPBenchmarkAgent:
         sheet['A1'] = "Performance Recommendations"
         sheet['A1'].font = Font(size=14, bold=True)
         
+        print("#*"*35)
+        print("analysis_results in _create_recommendations_sheet:\n",analysis_results)
         # Headers
         headers = ["Priority", "Component", "Issue", "Recommendation", "Impact"]
         for col, header in enumerate(headers, 1):
