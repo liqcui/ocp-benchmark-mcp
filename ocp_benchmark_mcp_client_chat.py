@@ -408,10 +408,15 @@ def _json_to_html_table(obj: Any, level: int = 0) -> str:
             else:
                 cell = str(value)
                 val_len = len(cell)
+            val_wrap_style = (
+                "white-space: normal; word-break: break-word; overflow-wrap: anywhere;"
+                if val_len > 50 else
+                "white-space: nowrap;"
+            )
             rows.append(
                 f"<tr>"
                 f"<td style='padding: 0 1ch; white-space: nowrap;'><strong>{key}</strong></td>"
-                f"<td style='padding: 0 1ch; white-space: nowrap;'>{cell}</td>"
+                f"<td style='padding: 0 1ch; {val_wrap_style}'>{cell}</td>"
                 f"</tr>"
             )
             if isinstance(key, str):
@@ -439,30 +444,56 @@ def _json_to_html_table(obj: Any, level: int = 0) -> str:
         # 如果列表里全是 dict，则做成一张横向表头统一的表格
         if all(isinstance(item, dict) for item in obj):
             headers = list({k for d in obj for k in d.keys()})
-            thead = "<thead><tr>" + "".join(f"<th style='padding: 0 1ch; white-space: nowrap;'>{h}</th>" for h in headers) + "</tr></thead>"
 
-            # Compute per-column widths based on max text length
+            # Compute per-column widths based on max text length (first pass)
             default_nested_width = 30
             col_widths = [len(str(h)) for h in headers]
+            rows_cells_info = []  # List[List[Tuple[str, int]]]
 
-            tbody_rows = []
             for item in obj:
-                row_cells = []
+                row_info = []
                 for idx, h in enumerate(headers):
                     v = item.get(h, "")
                     if isinstance(v, (dict, list)):
                         v_html = _json_to_html_table(v, level + 1)
                         display_len = default_nested_width
-                        row_cells.append(f"<td style='padding: 0 1ch; white-space: nowrap;'>{v_html}</td>")
+                        row_info.append((v_html, display_len))
                     else:
                         v_str = str(v)
                         display_len = len(v_str)
-                        row_cells.append(f"<td style='padding: 0 1ch; white-space: nowrap;'>{v_str}</td>")
+                        row_info.append((v_str, display_len))
                     col_widths[idx] = max(col_widths[idx], display_len)
-                tbody_rows.append("<tr>" + "".join(row_cells) + "</tr>")
+                rows_cells_info.append(row_info)
+
+            # Determine wrap flags per column based on width threshold
+            wrap_flags = [w > 50 for w in col_widths]
+
+            # Build thead with wrapping rules
+            thead_cells = []
+            for idx, h in enumerate(headers):
+                wrap_style = (
+                    "white-space: normal; word-break: break-word; overflow-wrap: anywhere;"
+                    if wrap_flags[idx] else
+                    "white-space: nowrap;"
+                )
+                thead_cells.append(f"<th style='padding: 0 1ch; {wrap_style}'>{h}</th>")
+            thead = "<thead><tr>" + "".join(thead_cells) + "</tr></thead>"
+
+            # Build tbody (second pass) with wrapping per column
+            tbody_rows = []
+            for row_info in rows_cells_info:
+                row_cells_html = []
+                for idx, (content_html, _display_len) in enumerate(row_info):
+                    wrap_style = (
+                        "white-space: normal; word-break: break-word; overflow-wrap: anywhere;"
+                        if wrap_flags[idx] else
+                        "white-space: nowrap;"
+                    )
+                    row_cells_html.append(f"<td style='padding: 0 1ch; {wrap_style}'>{content_html}</td>")
+                tbody_rows.append("<tr>" + "".join(row_cells_html) + "</tr>")
             tbody = "<tbody>" + "".join(tbody_rows) + "</tbody>"
 
-            # Add padding and caps
+            # Add padding and caps (colgroup widths)
             col_styles = []
             for w in col_widths:
                 w2 = min(w + 2, 80)

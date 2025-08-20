@@ -32,7 +32,8 @@ from elt.ocp_benchmark_elt import analyze_performance_data,benchmark_data_proces
 from elt.ocp_benchmark_elt_extract_node_info import extract_node_info_from_json_data_as_json
 from elt.ocp_benchmark_elt_extract_nodes_usage import extract_all_cluster_usage_info
 from elt.ocp_benchmark_elt_extract_pods_usage import extract_summary,extract_pod_totals,get_pod_names_and_basic_stats
-from elt.ocp_benchmark_elt_extract_disk_io import extract_performance_analysis,extract_nodes_performance_data
+from elt.ocp_benchmark_elt_extract_disk_io import extract_disk_performance_analysis,extract_nodes_performance_data
+from elt.ocp_benchmark_elt_extract_network import extract_network_performance_analysis
 from elt.ocp_benchmark_elt_extract_api_request_latency import extract_api_performance_analysis,extract_operation_statistics
 from elt.ocp_benchmark_elt_extract_api_request_rate import extract_request_rate_performance_analysis,extract_active_request_rates
 from elt.ocp_benchmark_elt_extract_etcd_latency import extract_etcd_performance_analysis,extract_active_operations
@@ -61,19 +62,15 @@ class ClusterInfoParams(BaseModel):
     
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
-
-
 class NodeInfoParams(BaseModel):
     """Parameters for getting node information."""
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
-
 
 class NodesUsageParams(BaseModel):
     """Parameters for getting nodes usage metrics."""
     duration_hours: float = Field(default=1.0, description="Duration in hours to collect data for")
     step: str = Field(default='1m', description="Query resolution step (e.g., '1m', '5m', '1h')")
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
-
 
 class PodsUsageParams(BaseModel):
     """Parameters for getting pods usage metrics."""
@@ -83,13 +80,11 @@ class PodsUsageParams(BaseModel):
     step: str = Field(default='1m', description="Query resolution step")
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
-
 class DiskMetricsParams(BaseModel):
     """Parameters for getting disk I/O metrics."""
     duration_hours: float = Field(default=1.0, description="Duration in hours to collect data for")
     step: str = Field(default='1m', description="Query resolution step")
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
-
 
 class NetworkMetricsParams(BaseModel):
     """Parameters for getting network metrics."""
@@ -97,13 +92,11 @@ class NetworkMetricsParams(BaseModel):
     step: str = Field(default='1m', description="Query resolution step")
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
-
 class APILatencyParams(BaseModel):
     """Parameters for getting API latency metrics."""
     duration_hours: float = Field(default=1.0, description="Duration in hours to collect data for")
     step: str = Field(default='1m', description="Query resolution step")
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
-
 
 class AnalyzePerformanceParams(BaseModel):
     """Parameters for performance analysis."""
@@ -187,7 +180,7 @@ async def get_cluster_information(params: ClusterInfoParams) -> str:
                 "version_info.version",
                 "version_info.update_available",
                 "infrastructure_info.platform",
-                "nfrastructure_info.infrastructure_name",
+                "infrastructure_info.infrastructure_name",
                 "summary.api_url"
             ])
             customized_cluster_info_json=json.dumps(custom_data, ensure_ascii=False, indent=2)
@@ -414,7 +407,7 @@ async def get_disk_io_metrics(params: DiskMetricsParams) -> str:
         result = get_disk_metrics(params.duration_hours, params.step)
         logger.info("Successfully retrieved disk I/O metrics")
         print("=== Performance Analysis ===")
-        performance_analysis = extract_performance_analysis(json.loads(result))
+        performance_analysis = extract_disk_performance_analysis(json.loads(result))
         
         # Extract simplified nodes performance data
         print("=== Nodes Performance Data (Statistics Only) ===")
@@ -451,7 +444,7 @@ async def get_network_performance_metrics(params: NetworkMetricsParams) -> str:
         logger.info(f"Getting network metrics for {params.duration_hours} hours")
         result = get_network_metrics(params.duration_hours, params.step)
         #print("result is:\n",result)
-        performance_data = extract_performance_analysis(json.loads(result))
+        performance_data = extract_network_performance_analysis(json.loads(result))
         print("performance_data is:\n",performance_data)
         customized_network_io_json=json.dumps(performance_data, indent=2)
         logger.info("Successfully retrieved network metrics")
@@ -904,7 +897,7 @@ async def identify_performance_bottlenecks(params: IdentifyBottlenecksParams) ->
         try:
             if not disk_raw:
                 raise RuntimeError("disk_raw skipped by component filter")
-            disk_pa = extract_performance_analysis(json.loads(disk_raw))
+            disk_pa = extract_disk_performance_analysis(json.loads(disk_raw))
             alerts = disk_pa.get('alerts', []) if isinstance(disk_pa, dict) else []
             for alert in alerts:
                 severity = alert.get('severity', 'warning')
@@ -930,7 +923,7 @@ async def identify_performance_bottlenecks(params: IdentifyBottlenecksParams) ->
         try:
             if not network_raw:
                 raise RuntimeError("network_raw skipped by component filter")
-            net_pa = extract_performance_analysis(json.loads(network_raw))
+            net_pa = extract_network_performance_analysis(json.loads(network_raw))
             alerts = net_pa.get('alerts', []) if isinstance(net_pa, dict) else []
             for alert in alerts:
                 severity = alert.get('severity', 'warning')

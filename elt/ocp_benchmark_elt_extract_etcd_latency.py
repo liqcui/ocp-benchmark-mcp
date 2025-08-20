@@ -2,6 +2,21 @@ import json
 import math
 
 
+def _round_decimals_in_obj(obj, ndigits: int = 2):
+    """
+    Recursively round all float values to ndigits and convert NaN/inf to "NaN" strings.
+    """
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return "NaN"
+        return round(obj, ndigits)
+    if isinstance(obj, list):
+        return [_round_decimals_in_obj(item, ndigits) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _round_decimals_in_obj(v, ndigits) for k, v in obj.items()}
+    return obj
+
+
 def extract_etcd_performance_analysis(data):
     """
     Extract performance analysis and cluster summary information from etcd latency data.
@@ -18,12 +33,12 @@ def extract_etcd_performance_analysis(data):
     if "performance_analysis" in data:
         perf_analysis = data["performance_analysis"].copy()
         
-        # Round numeric values in summary to 6 decimal places
+        # Round numeric values in summary to 2 decimal places
         if "summary" in perf_analysis:
             summary = perf_analysis["summary"]
             for key, value in summary.items():
                 if isinstance(value, (int, float)) and not math.isnan(value):
-                    summary[key] = round(value, 6)
+                    summary[key] = round(value, 2)
         
         result["performance_analysis"] = perf_analysis
     
@@ -33,17 +48,17 @@ def extract_etcd_performance_analysis(data):
         if "cluster_summary" in operations:
             cluster_summary = operations["cluster_summary"].copy()
             
-            # Round numeric values to 6 decimal places, handle NaN
+            # Round numeric values to 2 decimal places, handle NaN
             for key, value in cluster_summary.items():
                 if isinstance(value, (int, float)):
                     if math.isnan(value):
                         cluster_summary[key] = "NaN"
                     else:
-                        cluster_summary[key] = round(value, 6)
+                        cluster_summary[key] = round(value, 2)
             
             result["cluster_summary"] = cluster_summary
     
-    return result
+    return _round_decimals_in_obj(result, 2)
 
 
 def extract_active_operations(data):
@@ -75,11 +90,11 @@ def extract_active_operations(data):
                 mean_val = stats.get("mean", 0.0)
                 
                 if (min_val > 0.0 or max_val > 0.0 or mean_val > 0.0):
-                    # Round values to 6 decimal places
+                    # Round values to 2 decimal places
                     rounded_stats = {}
                     for key, value in stats.items():
                         if isinstance(value, (int, float)) and not math.isnan(value):
-                            rounded_stats[key] = round(value, 6)
+                            rounded_stats[key] = round(value, 2)
                         else:
                             rounded_stats[key] = value
 
@@ -88,7 +103,7 @@ def extract_active_operations(data):
                         "latency_stats": rounded_stats
                     }
     
-    return result
+    return _round_decimals_in_obj(result, 2)
 
 
 def process_etcd_data(data):
@@ -123,7 +138,7 @@ def process_etcd_data(data):
         **active_operations_data
     }
     
-    return result
+    return _round_decimals_in_obj(result, 2)
 
 
 # Example usage

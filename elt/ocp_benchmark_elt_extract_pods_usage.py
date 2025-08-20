@@ -1,4 +1,19 @@
 import json
+from typing import Any
+
+
+def _round_decimals_in_obj(obj: Any, ndigits: int = 2) -> Any:
+    """
+    Recursively round all float values in a Python object (dict/list/scalars).
+    Only float types are rounded; ints/str/bool/None are left untouched.
+    """
+    if isinstance(obj, float):
+        return round(obj, ndigits)
+    if isinstance(obj, list):
+        return [_round_decimals_in_obj(item, ndigits) for item in obj]
+    if isinstance(obj, dict):
+        return {key: _round_decimals_in_obj(value, ndigits) for key, value in obj.items()}
+    return obj
 
 
 def safe_get(obj, key, default=None):
@@ -78,7 +93,7 @@ def extract_summary(data):
                     "container_count": safe_get(info, "container_count", 0)
                 }
     
-    return extracted_summary
+    return _round_decimals_in_obj(extracted_summary, 2)
 
 
 def extract_pod_totals(data):
@@ -167,7 +182,7 @@ def extract_pod_totals(data):
     if "individual_pods" not in extracted_totals or not extracted_totals["individual_pods"]:
         extracted_totals["individual_pods"] = calculate_pod_totals_from_containers(data)
     
-    return extracted_totals
+    return _round_decimals_in_obj(extracted_totals, 2)
 
 
 def calculate_pod_totals_from_containers(data):
@@ -259,7 +274,7 @@ def calculate_pod_totals_from_containers(data):
             if pod_summary:
                 pod_totals[pod_name] = pod_summary
     
-    return pod_totals
+    return _round_decimals_in_obj(pod_totals, 2)
 
 
 def extract_container_stats(data, pod_name=None, container_name=None):
@@ -346,7 +361,7 @@ def extract_container_stats(data, pod_name=None, container_name=None):
                         "unit": safe_get(memory_usage, "unit", "MB")
                     }
     
-    return container_stats
+    return _round_decimals_in_obj(container_stats, 2)
 
 
 def validate_json_data(data):
@@ -452,7 +467,7 @@ def get_pod_names_and_basic_stats(data):
                 if pod_stats:
                     pod_summary[pod_name] = pod_stats
     
-    return pod_summary
+    return _round_decimals_in_obj(pod_summary, 2)
 
 
 def main():

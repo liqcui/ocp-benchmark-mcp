@@ -1,7 +1,7 @@
 import json
 from typing import Dict, List, Any
 
-def extract_performance_analysis(data: Dict[str, Any]) -> Dict[str, Any]:
+def extract_disk_performance_analysis(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract performance analysis data from the disk IO JSON file.
     Rounds floating point numbers to 2 decimal places.
@@ -131,7 +131,7 @@ def main():
     
     # Extract performance analysis
     print("=== Performance Analysis ===")
-    performance_analysis = extract_performance_analysis(data)
+    performance_analysis = extract_disk_performance_analysis(data)
     print(json.dumps(performance_analysis, indent=2))
     
     print("\n" + "="*50 + "\n")

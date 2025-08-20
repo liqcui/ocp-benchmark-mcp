@@ -1,6 +1,19 @@
 import json
 from typing import Union, Dict, Any, List, Optional
 
+def _round_decimals_in_obj(obj: Any, ndigits: int = 2) -> Any:
+    """
+    Recursively round all float values in a Python object (dict/list/scalars).
+    Only float types are rounded; ints/str/bool/None are left untouched.
+    """
+    if isinstance(obj, float):
+        return round(obj, ndigits)
+    if isinstance(obj, list):
+        return [_round_decimals_in_obj(item, ndigits) for item in obj]
+    if isinstance(obj, dict):
+        return {key: _round_decimals_in_obj(value, ndigits) for key, value in obj.items()}
+    return obj
+
 class JSONExtractor:
     """A common JSON data extractor with flexible field extraction capabilities."""
     
@@ -42,7 +55,7 @@ class JSONExtractor:
             except Exception as e:
                 result[path] = f"Error: {str(e)}"
         
-        return result
+        return _round_decimals_in_obj(result,2)
     
     def extract_all_by_key(self, key_name: str) -> List[Any]:
         """
@@ -276,11 +289,11 @@ if __name__ == "__main__":
     
     print("\n=== EXTRACT SUMMARY SECTION ===")
     summary = extractor.extract_section("data.summary")
-    print(json.dumps(summary, indent=2))
+    print(json.dumps(_round_decimals_in_obj(summary, 2), indent=2))
     
     print("\n=== EXTRACT VERSION INFO ===")
     version_info = extractor.extract_section("data.version_info")
-    print(json.dumps(version_info, indent=2))
+    print(json.dumps(_round_decimals_in_obj(version_info, 2), indent=2))
     
     print("\n=== FIND ALL 'cluster_name' VALUES ===")
     cluster_names = extractor.extract_all_by_key("cluster_name")
@@ -299,4 +312,4 @@ if __name__ == "__main__":
         openshift_json, 
         custom_fields=["data.cluster_name", "data.version_info.version", "success"]
     )
-    print(json.dumps(quick_extract, indent=2))
+    print(json.dumps(_round_decimals_in_obj(quick_extract, 2), indent=2))

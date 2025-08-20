@@ -11,6 +11,20 @@ from typing import Dict, List, Optional, Any, Union
 import os
 
 
+def _round_decimals_in_obj(obj: Any, ndigits: int = 2) -> Any:
+    """
+    Recursively round all float values in a Python object (dict/list/scalars).
+    Only float types are rounded; ints/str/bool/None are left untouched.
+    """
+    if isinstance(obj, float):
+        return round(obj, ndigits)
+    if isinstance(obj, list):
+        return [_round_decimals_in_obj(item, ndigits) for item in obj]
+    if isinstance(obj, dict):
+        return {key: _round_decimals_in_obj(value, ndigits) for key, value in obj.items()}
+    return obj
+
+
 def _load_data(input_data: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     """
     Helper function to load data from various input types.
@@ -70,7 +84,7 @@ def _load_data(input_data: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
         raise ValueError(f"Input must be a file path (str), JSON string (str), or dictionary (dict). Got: {type(input_data)}")
 
 
-def extract_performance_analysis(input_data: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+def extract_network_performance_analysis(input_data: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     """
     Extract performance analysis information from network data.
     
@@ -111,7 +125,7 @@ def extract_performance_analysis(input_data: Union[str, Dict[str, Any]]) -> Dict
             }
             result["alerts"].append(rounded_alert)
         
-        return result
+        return _round_decimals_in_obj(result, 2)
         
     except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
         print(f"Error: {e}")
@@ -184,7 +198,7 @@ def extract_interface_details(input_data: Union[str, Dict[str, Any]], node_name:
                 if error_type in interface_data['errors']:
                     result['errors'][error_type] = round_statistics(interface_data['errors'][error_type])
         
-        return result
+        return _round_decimals_in_obj(result, 2)
         
     except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
         print(f"Error: {e}")
@@ -239,7 +253,7 @@ def main():
     file_path = "network-full.json"  # Update this path as needed
     
     print("=== Demo with File Path ===")
-    performance_data = extract_performance_analysis(file_path)
+    performance_data = extract_network_performance_analysis(file_path)
     if performance_data:
         print(f"Overall Status: {performance_data['overall_status']}")
         print(f"Number of alerts: {len(performance_data['alerts'])}")
@@ -251,7 +265,7 @@ def main():
             data_dict = json.load(file)
         
         # Use the dictionary directly
-        performance_data = extract_performance_analysis(data_dict)
+        performance_data = extract_network_performance_analysis(data_dict)
         nodes_interfaces = list_available_nodes_and_interfaces(data_dict)
         
         print(f"Performance status from dict: {performance_data.get('overall_status', 'N/A')}")
@@ -311,7 +325,7 @@ def main():
     }
     '''
     
-    performance_from_json = extract_performance_analysis(json_string)
+    performance_from_json = extract_network_performance_analysis(json_string)
     nodes_from_json = list_available_nodes_and_interfaces(json_string)
     
     print(f"Performance status from JSON string: {performance_from_json.get('overall_status', 'N/A')}")
@@ -325,13 +339,13 @@ def main():
     
     print("\n=== Usage Examples ===")
     print("# Using file path:")
-    print('performance_data = extract_performance_analysis("network-full.json")')
+    print('performance_data = extract_network_performance_analysis("network-full.json")')
     print("\n# Using dictionary:")
     print('with open("network-full.json") as f: data = json.load(f)')
-    print('performance_data = extract_performance_analysis(data)')
+    print('performance_data = extract_network_performance_analysis(data)')
     print("\n# Using JSON string:")
     print('json_str = \'{"performance_analysis": {...}}\'')
-    print('performance_data = extract_performance_analysis(json_str)')
+    print('performance_data = extract_network_performance_analysis(json_str)')
 
 
 if __name__ == "__main__":

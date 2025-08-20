@@ -1,6 +1,19 @@
 import json
 from typing import List, Dict, Any, Optional
 
+def _round_decimals_in_obj(obj: Any, ndigits: int = 2) -> Any:
+    """
+    Recursively round all float values in a Python object (dict/list/scalars).
+    Only float types are rounded; ints/str/bool/None are left untouched.
+    """
+    if isinstance(obj, float):
+        return round(obj, ndigits)
+    if isinstance(obj, list):
+        return [_round_decimals_in_obj(item, ndigits) for item in obj]
+    if isinstance(obj, dict):
+        return {key: _round_decimals_in_obj(value, ndigits) for key, value in obj.items()}
+    return obj
+
 def extract_node_info(file_path: str) -> List[Dict[str, Any]]:
     """
     Extract node information from OpenShift cluster node data file.
@@ -84,7 +97,6 @@ def extract_node_info_from_json_data(json_data: Dict[str, Any]) -> List[Dict[str
                     'instance_type': node.get('instance_type'),
                     'capacity': {
                         'cpu_cores': node.get('capacity', {}).get('cpu_cores'),
-                        'memory_bytes': node.get('capacity', {}).get('memory_bytes'),
                         'memory_gb': node.get('capacity', {}).get('memory_gb')
                     }
                 }
@@ -166,6 +178,7 @@ def extract_node_info_as_json(file_path: str, indent: int = 2) -> str:
         "nodes": nodes
     }
     
+    output = _round_decimals_in_obj(output, 2)
     return json.dumps(output, indent=indent)
 
 def extract_node_info_from_json_data_as_json(json_data: Dict[str, Any], indent: int = 2) -> str:
@@ -193,6 +206,7 @@ def extract_node_info_from_json_data_as_json(json_data: Dict[str, Any], indent: 
         "nodes": nodes
     }
     
+    output = _round_decimals_in_obj(output, 2)
     return json.dumps(output, indent=indent)
 
 def save_extracted_nodes_to_json(file_path: str, output_file: str) -> bool:
@@ -240,7 +254,7 @@ if __name__ == "__main__":
             "total_worker_nodes": len(worker_nodes),
             "nodes": worker_nodes
         }
-        print(json.dumps(worker_json, indent=2))
+        print(json.dumps(_round_decimals_in_obj(worker_json, 2), indent=2))
     
     # Example 4: Get only specific role as JSON
     print("\n=== Master Nodes Only (JSON) ===")
@@ -251,4 +265,4 @@ if __name__ == "__main__":
             "total_master_nodes": len(master_nodes),
             "nodes": master_nodes
         }
-        print(json.dumps(master_json, indent=2))
+        print(json.dumps(_round_decimals_in_obj(master_json, 2), indent=2))

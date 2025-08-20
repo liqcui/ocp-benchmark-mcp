@@ -227,7 +227,6 @@ def extract_node_statistics(data: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
                 "unit": node_info.get('memory_usage', {}).get('unit', 'percent')
             },
             "memory_total": {
-                "bytes": round_float(node_info.get('memory_total', {}).get('bytes')),
                 "gb": round_float(node_info.get('memory_total', {}).get('gb'))
             }
         }
@@ -317,7 +316,6 @@ def test_all_extractors():
                     "unit": "percent"
                 },
                 "memory_total": {
-                    "bytes": 134606315520.0,
                     "gb": 125.36
                 }
             },
@@ -341,7 +339,6 @@ def test_all_extractors():
                     "unit": "percent"
                 },
                 "memory_total": {
-                    "bytes": 134606331904.0,
                     "gb": 125.36
                 }
             }
