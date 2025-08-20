@@ -104,6 +104,8 @@ python ocp_benchmark_mcp_server.py
 ```bash
 python ocp_benchmark_mcp_client_chat.py
 ```
+### Interactive Chat UI
+<img width="1712" height="940" alt="截屏2025-08-19 23 16 39" src="https://github.com/user-attachments/assets/cb7835f2-d80d-4abb-9841-d9ec306ef40b" />
 
 ### Run Performance Analysis Agent
 ```bash
@@ -207,7 +209,7 @@ MIT License
  
 ---
 
-## Quick Start (Addendum)
+## Quick Start
 
 Follow these steps without removing any of the above instructions:
 
