@@ -21,26 +21,6 @@ This AI‑assisted MCP platform fuses Prometheus metrics and OpenShift APIs with
 
 ## Architecture Topology
 ```
-┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
-│   MCP Server        │    │   MCP API Server    │    │   Chat Interface    │
-│   (Port 8000)       │◄───│   (Port 8080)       │◄───│   (Port 8081)       │
-│                     │    │                     │    │                     │
-│   • MCP Tools       │    │   • REST Endpoints  │    │   • LLM Chat        │
-│   • Prometheus      │    │   • FastAPI         │    │   • Web Interface   │
-│   • OpenShift API   │    │   • Health Checks   │    │   • Streaming       │
-└─────────────────────┘    └─────────────────────┘    └─────────────────────┘
-           │                                                       │
-           ▼                                                       ▼
-┌─────────────────────┐                            ┌─────────────────────┐
-│   AI Agent          │                            │   Performance       │
-│   (LangGraph)       │                            │   Analyzer          │
-│                     │                            │                     │
-│   • Analysis Flow   │                            │   • Baseline Comp   │
-│   • Recommendations │                            │   • Trend Analysis  │
-│   • Report Export   │                            │   • Efficiency      │
-└─────────────────────┘                            └─────────────────────┘
-```
-```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    OCP Benchmark MCP Architecture                │
 ├─────────────────────────────────────────────────────────────────┤
@@ -76,6 +56,28 @@ This AI‑assisted MCP platform fuses Prometheus metrics and OpenShift APIs with
 │  └─────────────────┘    └──────────────────┘    └─────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+```
+┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
+│   MCP Server        │    │   MCP API Server    │    │   Chat Interface    │
+│   (Port 8000)       │◄───│   (Port 8080)       │◄───│   (Port 8081)       │
+│                     │    │                     │    │                     │
+│   • MCP Tools       │    │   • REST Endpoints  │    │   • LLM Chat        │
+│   • Prometheus      │    │   • FastAPI         │    │   • Web Interface   │
+│   • OpenShift API   │    │   • Health Checks   │    │   • Streaming       │
+└─────────────────────┘    └─────────────────────┘    └─────────────────────┘
+           │                                                       │
+           ▼                                                       ▼
+┌─────────────────────┐                            ┌─────────────────────┐
+│   AI Agent          │                            │   Performance       │
+│   (LangGraph)       │                            │   Analyzer          │
+│                     │                            │                     │
+│   • Analysis Flow   │                            │   • Baseline Comp   │
+│   • Recommendations │                            │   • Trend Analysis  │
+│   • Report Export   │                            │   • Efficiency      │
+└─────────────────────┘                            └─────────────────────┘
+```
+
 
 ## Installation
 
