@@ -3,14 +3,11 @@ from typing import Any, Dict, Union
 
 def auto_reduce_json_levels(data: Union[Dict, Any], separator: str = '.') -> Dict[str, Any]:
     """
-    Automatically detects the depth of JSON and reduces it to 1-4 levels based on original depth.
+    Automatically detects JSON depth and caps the structure to a maximum of 3 levels.
     
     Rules:
-    - Depth <= 4: No change
-    - 5-6 levels: Reduce to 4 levels
-    - 7-8 levels: Reduce to 3 levels
-    - 9-10 levels: Reduce to 2 levels
-    - 11+ levels: Reduce to 1 level (completely flat)
+    - Depth <= 3: No change
+    - Depth > 3: Flatten anything beyond level 3 into dotted/bracketed keys
     
     Args:
         data: The input JSON data (dict or any JSON-serializable object)
@@ -29,19 +26,12 @@ def auto_reduce_json_levels(data: Union[Dict, Any], separator: str = '.') -> Dic
         return max(get_depth(value, current_depth + 1) for value in obj.values())
     
     def determine_target_levels(original_depth):
-        """Automatically determine target levels (1-4) based on original depth."""
-        if original_depth <= 4:
-            return original_depth  # No change needed
-        elif original_depth <= 6:
-            return 4  # Reduce to 4 levels
-        elif original_depth <= 8:
-            return 3  # Reduce to 3 levels
-        elif original_depth <= 10:
-            return 2  # Reduce to 2 levels
-        else:
-            return 1  # Completely flat for very deep structures
+        """Cap the target nesting to at most 3 levels."""
+        if original_depth <= 3:
+            return original_depth
+        return 3
     
-    def flatten_recursive(obj, parent_key='', current_level=1, target_levels=4):
+    def flatten_recursive(obj, parent_key='', current_level=1, target_levels=3):
         """Recursively flatten the object up to target_levels, then fully flatten deeper parts."""
         items = []
         
@@ -131,13 +121,13 @@ def auto_reduce_json_levels(data: Union[Dict, Any], separator: str = '.') -> Dic
 
 def convert_json_auto_reduce(json_input: Union[str, Dict]) -> str:
     """
-    Main function that automatically detects JSON depth and reduces to optimal 1-4 levels.
+    Main function that automatically detects JSON depth and caps to a maximum of 3 levels.
     
     Args:
         json_input: JSON string or dictionary
     
     Returns:
-        JSON string with automatically optimized nesting levels (1-4 max)
+        JSON string with nesting levels capped at 3
     """
     
     # Parse JSON if it's a string
@@ -184,16 +174,9 @@ def get_json_depth_info(json_input: Union[str, Dict]) -> Dict[str, Any]:
         return max(get_depth(value, current_depth + 1) for value in obj.values())
     
     def determine_target_levels(original_depth):
-        if original_depth <= 4:
+        if original_depth <= 3:
             return original_depth
-        elif original_depth <= 6:
-            return 4
-        elif original_depth <= 8:
-            return 3
-        elif original_depth <= 10:
-            return 2
-        else:
-            return 1
+        return 3
     
     if not isinstance(data, dict):
         return {
@@ -210,13 +193,13 @@ def get_json_depth_info(json_input: Union[str, Dict]) -> Dict[str, Any]:
         "original_depth": original_depth,
         "target_depth": target_depth,
         "reduction_needed": target_depth != original_depth,
-        "reduction_reason": f"Optimizing {original_depth} levels to {target_depth} levels (1-4 range)"
+        "reduction_reason": f"Capping depth from {original_depth} to {target_depth} levels (max 3)"
     }
 
 
 # Example usage and testing
 if __name__ == "__main__":
-    # Test case 1: Very deep JSON (18 levels) - should reduce to 1 level
+    # Test case 1: Very deep JSON (18 levels) - should cap to 3 levels
     very_deep_json = {
         "a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": {"j": {"k": {"l": {"m": {"n": {"o": {"p": {"q": {"r": "extremely_deep_value"}}}}}}}}}}}}}}}}}
     }
@@ -232,7 +215,7 @@ if __name__ == "__main__":
     
     print("\n" + "="*70 + "\n")
     
-    # Test case 2: JSON with 8 levels - should reduce to 3 levels
+    # Test case 2: JSON with 8 levels - should cap to 3 levels
     eight_level_json = {
         "company": {
             "departments": {
@@ -294,7 +277,7 @@ if __name__ == "__main__":
     
     print("\n" + "="*70 + "\n")
     
-    # Test case 4: JSON with 6 levels - should reduce to 4 levels
+    # Test case 4: JSON with 6 levels - should cap to 3 levels
     six_level_json = {
         "app": {
             "modules": {
@@ -328,7 +311,7 @@ if __name__ == "__main__":
     
     print("\n" + "="*70 + "\n")
     
-    # Test case 5: JSON with 10 levels - should reduce to 2 levels
+    # Test case 5: JSON with 10 levels - should reduce to 3 levels
     ten_level_json = {
         "system": {
             "database": {
@@ -365,7 +348,7 @@ if __name__ == "__main__":
     
     print("\n" + "="*70 + "\n")
     
-    # Test case 6: JSON with 12 levels - should reduce to 1 level
+    # Test case 6: JSON with 12 levels - should cap to 3 levels
     twelve_level_json = {
         "enterprise": {
             "organizations": {
@@ -407,7 +390,7 @@ if __name__ == "__main__":
     print("\n" + "="*70 + "\n")
     
     # Test case 7: Show reduction cap summary
-    print("Summary of reduction logic (1-4 target levels):")
+    print("Summary of reduction logic (max 3 levels):")
     test_depths = [3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18]
     for depth in test_depths:
         # Create a simple nested structure for testing
