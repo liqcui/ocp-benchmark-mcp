@@ -408,11 +408,8 @@ def _json_to_html_table(obj: Any, level: int = 0) -> str:
             else:
                 cell = str(value)
                 val_len = len(cell)
-            val_wrap_style = (
-                "white-space: normal; word-break: break-word; overflow-wrap: anywhere;"
-                if val_len > 50 else
-                "white-space: nowrap;"
-            )
+            # Always no-wrap for value cells
+            val_wrap_style = "white-space: nowrap;"
             rows.append(
                 f"<tr>"
                 f"<td style='padding: 0 1ch; white-space: nowrap;'><strong>{key}</strong></td>"
@@ -471,11 +468,8 @@ def _json_to_html_table(obj: Any, level: int = 0) -> str:
             # Build thead with wrapping rules
             thead_cells = []
             for idx, h in enumerate(headers):
-                wrap_style = (
-                    "white-space: normal; word-break: break-word; overflow-wrap: anywhere;"
-                    if wrap_flags[idx] else
-                    "white-space: nowrap;"
-                )
+                # Always no-wrap for header cells
+                wrap_style = "white-space: nowrap;"
                 thead_cells.append(f"<th style='padding: 0 1ch; {wrap_style}'>{h}</th>")
             thead = "<thead><tr>" + "".join(thead_cells) + "</tr></thead>"
 
@@ -484,11 +478,8 @@ def _json_to_html_table(obj: Any, level: int = 0) -> str:
             for row_info in rows_cells_info:
                 row_cells_html = []
                 for idx, (content_html, _display_len) in enumerate(row_info):
-                    wrap_style = (
-                        "white-space: normal; word-break: break-word; overflow-wrap: anywhere;"
-                        if wrap_flags[idx] else
-                        "white-space: nowrap;"
-                    )
+                    # Always no-wrap for body cells
+                    wrap_style = "white-space: nowrap;"
                     row_cells_html.append(f"<td style='padding: 0 1ch; {wrap_style}'>{content_html}</td>")
                 tbody_rows.append("<tr>" + "".join(row_cells_html) + "</tr>")
             tbody = "<tbody>" + "".join(tbody_rows) + "</tbody>"
